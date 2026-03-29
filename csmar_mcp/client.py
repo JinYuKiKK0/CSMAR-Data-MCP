@@ -91,6 +91,33 @@ class ValidationRecord:
     can_materialize: bool
 
 
+_SEMANTIC_QUERY_ALIASES: dict[str, tuple[str, ...]] = {
+    "roa": ("return on assets", "return on asset", "roaa", "asset return"),
+    "roaa": ("roa", "return on assets", "asset return"),
+    "资本充足率": (
+        "capital adequacy ratio",
+        "capital adequacy",
+        "capital ratio",
+        "car",
+    ),
+    "拨备覆盖率": (
+        "loan loss reserve coverage",
+        "loan loss provision coverage",
+        "allowance coverage",
+        "provision coverage",
+        "llr coverage",
+    ),
+    "不良贷款率": (
+        "non performing loan ratio",
+        "non-performing loan ratio",
+        "npl ratio",
+        "npl",
+    ),
+    "净息差": ("net interest margin", "nim"),
+    "净利差": ("net interest spread", "nis"),
+}
+
+
 class CsmarClient:
     def __init__(
         self,
@@ -412,14 +439,18 @@ class CsmarClient:
 
         sample_rows: list[dict[str, Any]] | None = None
         if request.sample_rows > 0 and row_count > 0:
-            sample_rows = self.query_sample(
-                table_code=request.table_code,
-                columns=request.columns,
-                sample_rows=request.sample_rows,
-                condition=request.condition,
-                start_date=request.start_date,
-                end_date=request.end_date,
-            )
+            try:
+                sample_rows = self.query_sample(
+                    table_code=request.table_code,
+                    columns=request.columns,
+                    sample_rows=request.sample_rows,
+                    condition=request.condition,
+                    start_date=request.start_date,
+                    end_date=request.end_date,
+                )
+            except CsmarMcpError as error:
+                if error.error_code not in {"rate_limited", "upstream_error"}:
+                    raise
 
         can_materialize = row_count > 0
         result = ProbeQueryOutput(
@@ -509,16 +540,15 @@ class CsmarClient:
     ) -> int:
         payload = self._build_query_payload(table_code, columns, condition, start_date, end_date)
         response = self._post(self._service.urlUtil.getQueryCountUrl(), payload)
-        count_value = response.get("data", 0)
-        try:
-            return int(count_value)
-        except (TypeError, ValueError) as error:
+        parsed_count = self._extract_first_int(response.get("data", 0))
+        if parsed_count is None:
             raise CsmarMcpError(
                 "upstream_error",
                 "CSMAR returned an unexpected row count.",
                 hint="Retry the same request. If it fails again, inspect table schema and simplify conditions.",
-                raw_message=repr(count_value),
-            ) from error
+                raw_message=repr(response.get("data", 0)),
+            )
+        return parsed_count
 
     def query_sample(
         self,
@@ -535,10 +565,8 @@ class CsmarClient:
         limited_condition = self._append_limit_clause(condition, sample_rows)
         payload = self._build_query_payload(table_code, columns, limited_condition, start_date, end_date)
         response = self._post(self._service.urlUtil.getQueryUrl(), payload)
-        data = response.get("data", {})
-        rows = data.get("previewDatas", []) if isinstance(data, dict) else []
-        normalized_rows = [row for row in rows if isinstance(row, dict)]
-        return normalized_rows[:sample_rows]
+        rows = self._extract_preview_rows(response.get("data", {}))
+        return rows[:sample_rows]
 
     def _materialize_query_once(
         self,
@@ -723,40 +751,18 @@ class CsmarClient:
         role_hint: str | None,
         frequency_hint: str | None,
     ) -> tuple[float, str] | None:
+        best_match = self._score_semantic_field_match(field, query)
+        if best_match is None:
+            return None
+
+        score, reason = best_match
         field_name = field.field_name.lower()
         field_label = (field.field_label or "").lower()
         field_description = (field.field_description or "").lower()
-        data_type = (field.data_type or "").lower()
         role_blob = " ".join(field.role_tags or []).lower()
         frequency_blob = " ".join(field.frequency_tags or []).lower()
 
-        reasons: list[str] = []
-        if query == field_name:
-            score = 100.0
-            reasons.append("exact field name match")
-        elif field_label and query == field_label:
-            score = 98.0
-            reasons.append("exact field label match")
-        elif query in field_name:
-            score = 94.0
-            reasons.append("field name contains query")
-        elif field_label and query in field_label:
-            score = 91.0
-            reasons.append("field label contains query")
-        elif field_description and query in field_description:
-            score = 87.0
-            reasons.append("field description contains query")
-        else:
-            ratio = max(
-                SequenceMatcher(None, query, field_name).ratio(),
-                SequenceMatcher(None, query, field_label).ratio() if field_label else 0.0,
-                SequenceMatcher(None, query, field_description).ratio() if field_description else 0.0,
-                SequenceMatcher(None, query, data_type).ratio() if data_type else 0.0,
-            )
-            if ratio < 0.34:
-                return None
-            score = round(60.0 + ratio * 30.0, 2)
-            reasons.append("similar to query text")
+        reasons = [reason]
 
         if role_hint:
             normalized_role_hint = role_hint.strip().lower()
@@ -783,6 +789,83 @@ class CsmarClient:
                 score -= 1.0
 
         return round(max(0.0, min(100.0, score)), 2), "; ".join(reasons)
+
+    def _score_semantic_field_match(
+        self,
+        field: FieldSchemaItem,
+        query: str,
+    ) -> tuple[float, str] | None:
+        best_match: tuple[float, str] | None = None
+        for search_term in self._expand_semantic_queries(query):
+            scored = self._score_single_field_match(field, search_term)
+            if scored is None:
+                continue
+
+            score, reason = scored
+            if search_term != query:
+                reason = f"{reason}; semantic alias matched"
+
+            if best_match is None or score > best_match[0]:
+                best_match = (score, reason)
+
+        return best_match
+
+    def _score_single_field_match(
+        self,
+        field: FieldSchemaItem,
+        query: str,
+    ) -> tuple[float, str] | None:
+        field_name = field.field_name.lower()
+        field_label = (field.field_label or "").lower()
+        field_description = (field.field_description or "").lower()
+        data_type = (field.data_type or "").lower()
+
+        if query == field_name:
+            return 100.0, "exact field name match"
+        if field_label and query == field_label:
+            return 98.0, "exact field label match"
+        if query in field_name:
+            return 94.0, "field name contains query"
+        if field_label and query in field_label:
+            return 91.0, "field label contains query"
+        if field_description and query in field_description:
+            return 87.0, "field description contains query"
+
+        ratio = max(
+            SequenceMatcher(None, query, field_name).ratio(),
+            SequenceMatcher(None, query, field_label).ratio() if field_label else 0.0,
+            SequenceMatcher(None, query, field_description).ratio()
+            if field_description
+            else 0.0,
+            SequenceMatcher(None, query, data_type).ratio() if data_type else 0.0,
+        )
+        if ratio < 0.34:
+            return None
+        return round(60.0 + ratio * 30.0, 2), "similar to query text"
+
+    def _expand_semantic_queries(self, query: str) -> list[str]:
+        normalized_query = query.strip().lower()
+        expanded: list[str] = []
+        seen: set[str] = set()
+
+        def add_term(value: str) -> None:
+            cleaned = value.strip().lower()
+            if not cleaned or cleaned in seen:
+                return
+            seen.add(cleaned)
+            expanded.append(cleaned)
+
+        add_term(normalized_query)
+
+        for source, aliases in _SEMANTIC_QUERY_ALIASES.items():
+            normalized_source = source.strip().lower()
+            alias_pool = (normalized_source, *aliases)
+            if not any(term in normalized_query for term in alias_pool):
+                continue
+            for term in alias_pool:
+                add_term(term)
+
+        return expanded
 
     def _normalize_field_schema_list(self, values: Any) -> list[FieldSchemaItem]:
         if not isinstance(values, list):
@@ -813,16 +896,41 @@ class CsmarClient:
             seen.add(field_name)
             field_label = self._pick_text(
                 raw_item,
-                preferred_keys=("fieldLabel", "label", "fieldNameCn", "cnName", "nameCn", "displayName", "title"),
-                token_hints=("label", "title", "cn", "ch", "display"),
+                preferred_keys=(
+                    "fieldLabel",
+                    "label",
+                    "fieldNameCn",
+                    "cnName",
+                    "nameCn",
+                    "displayName",
+                    "title",
+                    "caption",
+                    "fieldCaption",
+                    "alias",
+                    "zhName",
+                    "chsName",
+                    "itemName",
+                ),
+                token_hints=("label", "title", "caption", "cn", "ch", "zh", "display", "alias", "item"),
             )
             if field_label == field_name:
                 field_label = None
 
             field_description = self._pick_text(
                 raw_item,
-                preferred_keys=("fieldDesc", "description", "remark", "comment", "memo", "help"),
-                token_hints=("desc", "description", "remark", "comment", "memo", "help"),
+                preferred_keys=(
+                    "fieldDesc",
+                    "description",
+                    "remark",
+                    "comment",
+                    "memo",
+                    "help",
+                    "definition",
+                    "explain",
+                    "indicatorMeaning",
+                    "fieldMeaning",
+                ),
+                token_hints=("desc", "description", "remark", "comment", "memo", "help", "meaning", "explain"),
             )
             data_type = self._pick_text(
                 raw_item,
@@ -950,6 +1058,46 @@ class CsmarClient:
             deduplicated.append(item)
 
         return deduplicated or None
+
+    def _extract_first_int(self, value: Any) -> int | None:
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float):
+            return int(value)
+        if isinstance(value, str):
+            matched = re.search(r"-?\d+", value)
+            if matched is None:
+                return None
+            return int(matched.group())
+        if isinstance(value, dict):
+            for nested_value in value.values():
+                parsed = self._extract_first_int(nested_value)
+                if parsed is not None:
+                    return parsed
+            return None
+        if isinstance(value, list):
+            for nested_value in value:
+                parsed = self._extract_first_int(nested_value)
+                if parsed is not None:
+                    return parsed
+        return None
+
+    def _extract_preview_rows(self, value: Any) -> list[dict[str, Any]]:
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+        if isinstance(value, dict):
+            for key in ("previewDatas", "rows", "items", "list", "data"):
+                nested_value = value.get(key)
+                rows = self._extract_preview_rows(nested_value)
+                if rows:
+                    return rows
+            for nested_value in value.values():
+                rows = self._extract_preview_rows(nested_value)
+                if rows:
+                    return rows
+        return []
 
     def _build_query_payload(
         self,
@@ -1105,6 +1253,8 @@ class CsmarClient:
 
         if upstream_code == -3004 or "offline" in lowered_message or "login" in lowered_message:
             error_code = "auth_failed"
+        elif upstream_code == -3110 or self._is_daily_limit_message(lowered_message):
+            error_code = "daily_limit_exceeded"
         elif any(token in lowered_message for token in ("purchase", "permission", "authorized")):
             error_code = "not_purchased"
         elif (
@@ -1140,6 +1290,7 @@ class CsmarClient:
             "field_not_found": "One or more requested columns do not exist in the table.",
             "invalid_condition": "The condition could not be parsed by CSMAR.",
             "rate_limited": "CSMAR is cooling down the same query.",
+            "daily_limit_exceeded": "CSMAR daily query limit has been reached for this account.",
             "download_failed": "CSMAR could not build or fetch the requested archive.",
             "unzip_failed": "The downloaded archive could not be extracted.",
             "upstream_error": "CSMAR returned an unexpected error.",
@@ -1156,6 +1307,7 @@ class CsmarClient:
             "field_not_found": "Use csmar_get_table_schema to inspect fields, then retry.",
             "invalid_condition": "Fix condition syntax and retry. Example: use '=' instead of '=='.",
             "rate_limited": "Retry after cooldown expires or change condition/date range.",
+            "daily_limit_exceeded": "Wait until tomorrow (UTC+8) for the daily limit to reset, or contact CSMAR support.",
             "download_failed": "Run csmar_probe_query first, then retry csmar_materialize_query.",
             "unzip_failed": "Retry materialization. If it fails again, clear output_dir and retry.",
             "upstream_error": "Retry the same request. If it fails again, narrow the query.",
@@ -1179,6 +1331,19 @@ class CsmarClient:
             "重复提交",
         )
         return any(token in lowered_message for token in rate_limit_tokens)
+
+    def _is_daily_limit_message(self, lowered_message: str) -> bool:
+        daily_limit_tokens = (
+            "limit for today",
+            "daily limit",
+            "reached the limit",
+            "query limit",
+            "queries has reached",
+            "今日查询",
+            "已达上限",
+            "次数已达",
+        )
+        return any(token in lowered_message for token in daily_limit_tokens)
 
     def _normalize_name_list(self, values: Any, dict_name_keys: tuple[str, ...]) -> list[str]:
         if not isinstance(values, list):

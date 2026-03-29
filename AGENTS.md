@@ -42,7 +42,7 @@
 - 查询日期范围不做硬编码限制；仅校验 `YYYY-MM-DD` 格式与起止顺序，然后原样透传给 SDK。
 - 预览/样本行数保持小上限，以节省上下文。
 - 遇到上游限流时优先复用缓存并返回标准化 error_code，避免重复打上游。
-- 错误码约定与 PLAN.md 保持一致：auth_failed、not_purchased、table_not_found、field_not_found、invalid_condition、rate_limited、download_failed、unzip_failed、upstream_error、invalid_arguments。
+- 错误码约定与 PLAN.md 保持一致：auth_failed、not_purchased、table_not_found、field_not_found、invalid_condition、rate_limited、daily_limit_exceeded、download_failed、unzip_failed、upstream_error、invalid_arguments。
 
 ## 文档导航
 

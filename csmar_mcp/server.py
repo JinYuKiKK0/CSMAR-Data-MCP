@@ -220,7 +220,11 @@ def _enrich_error(
                 suggested_args_patch = local_issue.suggested_args_patch
                 hint = local_issue.hint or hint
     elif error.error_code == "invalid_arguments" and validation_id:
-        hint = "Call csmar_probe_query first and pass a valid non-expired validation_id."
+        lowered_message = error.message.lower()
+        if "not found" in lowered_message or "expired" in lowered_message:
+            hint = "Call csmar_probe_query first and pass a valid non-expired validation_id."
+        elif "cannot be materialized" in lowered_message:
+            hint = "Fix invalid columns or broaden filters, then run csmar_probe_query again."
 
     return ToolError(
         code=error.error_code,
