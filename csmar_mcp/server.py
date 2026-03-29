@@ -1,29 +1,24 @@
 from __future__ import annotations
 
 import argparse
+import json
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, Sequence
 
 from mcp.server.fastmcp import FastMCP
-from mcp.types import ToolAnnotations
+from mcp.types import CallToolResult, PromptMessage, TextContent, ToolAnnotations
 from pydantic import ValidationError
 
 from .client import CsmarClient, CsmarMcpError
 from .models import (
-    DescribeTableInput,
-    DescribeTableOutput,
-    DownloadPlan,
-    DownloadArtifact,
-    ListDatabasesOutput,
-    ListTablesInput,
-    ListTablesOutput,
-    MaterializeDownloadsInput,
-    MaterializeDownloadsOutput,
-    ProbeQuery,
-    ProbeQueriesInput,
-    ProbeQueriesOutput,
-    ProbeResult,
+    CatalogSearchInput,
+    CatalogSearchOutput,
+    DownloadMaterializeInput,
+    GetTableSchemaInput,
+    QueryValidateInput,
+    TableSchemaOutput,
+    ToolError,
 )
 
 
@@ -47,7 +42,7 @@ def _build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="csmar-mcp",
         description=(
-            "Run CSMAR MCP server over stdio. Only account and password are "
+            "Run the Lean V2 CSMAR MCP server over stdio. Only account and password are "
             "accepted as runtime args; other settings are fixed in code."
         ),
     )
@@ -59,10 +54,7 @@ def _build_argument_parser() -> argparse.ArgumentParser:
 def _parse_runtime_settings(argv: Sequence[str] | None = None) -> RuntimeSettings:
     parser = _build_argument_parser()
     args = parser.parse_args(argv)
-    return RuntimeSettings(
-        account=args.account,
-        password=args.password,
-    )
+    return RuntimeSettings(account=args.account, password=args.password)
 
 
 def _configure_runtime(settings: RuntimeSettings) -> None:
@@ -94,519 +86,427 @@ def get_client() -> CsmarClient:
     )
 
 
-def _format_tool_error(error: CsmarMcpError) -> str:
-    if error.upstream_code is None:
-        return f"[{error.error_code}] {error.message}"
-    return f"[{error.error_code}] {error.message} (upstream_code={error.upstream_code})"
+def _text(text: str) -> TextContent:
+    return TextContent(type="text", text=text)
 
 
-def _normalize_probe_params(
-    params: ProbeQueriesInput | None,
-    *,
-    queries: list[ProbeQuery] | None,
-    table_name: str | None,
-    columns: list[str] | None,
-    condition: str | None,
-    start_date: str | None,
-    end_date: str | None,
-    sample_rows: int | None,
-    probe_id: str | None,
-) -> ProbeQueriesInput:
-    payload: dict[str, Any] = params.model_dump(mode="python", exclude_none=True) if params else {}
-
-    if queries is not None:
-        payload["queries"] = queries
-    if table_name is not None:
-        payload["table_name"] = table_name
-    if columns is not None:
-        payload["columns"] = columns
-    if condition is not None:
-        payload["condition"] = condition
-    if start_date is not None:
-        payload["start_date"] = start_date
-    if end_date is not None:
-        payload["end_date"] = end_date
-    if sample_rows is not None:
-        payload["sample_rows"] = sample_rows
-    if probe_id is not None:
-        payload["probe_id"] = probe_id
-
-    try:
-        return ProbeQueriesInput.model_validate(payload)
-    except ValidationError as error:
-        raise RuntimeError(
-            "参数格式错误。支持两种调用方式："
-            "1) 顶层扁平字段（table_name/columns/...）；"
-            "2) params 结构（params={...}）。"
-            f"详情: {error}"
-        ) from error
+def _json_text(payload: dict[str, Any]) -> str:
+    return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
-def _normalize_download_params(
-    params: MaterializeDownloadsInput | None,
-    *,
-    downloads: list[DownloadPlan] | None,
-    plans: list[DownloadPlan] | None,
-    output_dir: str | None,
-    table_name: str | None,
-    columns: list[str] | None,
-    condition: str | None,
-    start_date: str | None,
-    end_date: str | None,
-    download_id: str | None,
-    plan_id: str | None,
-) -> MaterializeDownloadsInput:
-    payload: dict[str, Any] = params.model_dump(mode="python", exclude_none=True) if params else {}
-
-    if downloads is not None:
-        payload["downloads"] = downloads
-    elif plans is not None:
-        payload["downloads"] = plans
-
-    if output_dir is not None:
-        payload["output_dir"] = output_dir
-    if table_name is not None:
-        payload["table_name"] = table_name
-    if columns is not None:
-        payload["columns"] = columns
-    if condition is not None:
-        payload["condition"] = condition
-    if start_date is not None:
-        payload["start_date"] = start_date
-    if end_date is not None:
-        payload["end_date"] = end_date
-
-    resolved_download_id = download_id if download_id is not None else plan_id
-    if resolved_download_id is not None:
-        payload["download_id"] = resolved_download_id
-
-    try:
-        return MaterializeDownloadsInput.model_validate(payload)
-    except ValidationError as error:
-        raise RuntimeError(
-            "参数格式错误。支持两种调用方式："
-            "1) 顶层扁平字段（table_name/columns/output_dir/...）；"
-            "2) params 结构（params={...}）。"
-            f"详情: {error}"
-        ) from error
+def _success(payload: dict[str, Any], summary: str) -> CallToolResult:
+    return CallToolResult(content=[_text(summary)], structuredContent=payload)
 
 
-def _build_cooldown_reason(remaining_seconds: int) -> str:
-    return (
-        "请求被本地冷却窗口拦截，以避免触发 CSMAR 30 分钟同条件限制。"
-        f"请在约 {remaining_seconds} 秒后重试，或调整 condition/start_date/end_date。"
+def _failure(error: ToolError) -> CallToolResult:
+    payload = error.as_dict()
+    return CallToolResult(content=[_text(f"[{error.code}] {error.message}")], structuredContent=payload, isError=True)
+
+
+def _invalid_arguments(error: ValidationError) -> CallToolResult:
+    issues: list[str] = []
+    for item in error.errors():
+        location = ".".join(str(part) for part in item.get("loc", ()))
+        message = item.get("msg", "invalid value")
+        issues.append(f"{location}: {message}" if location else message)
+
+    tool_error = ToolError(
+        code="invalid_arguments",
+        message="The tool arguments are invalid.",
+        hint="Fix the invalid fields and retry with the same tool.",
+        candidate_values=issues[:5] or None,
     )
+    return _failure(tool_error)
+
+
+def _local_condition_error(condition: str) -> CsmarMcpError | None:
+    normalized = condition.strip()
+    if not normalized:
+        return None
+
+    if "==" in normalized:
+        return CsmarMcpError(
+            "invalid_condition",
+            "The condition uses '==' which CSMAR does not accept.",
+            hint="Use '=' instead of '==', then retry.",
+            suggested_args_patch={"condition": normalized.replace("==", "=")},
+        )
+    if any(mark in normalized for mark in ("“", "”", "‘", "’")):
+        return CsmarMcpError(
+            "invalid_condition",
+            "The condition uses smart quotes which CSMAR does not accept.",
+            hint="Replace smart quotes with plain ASCII quotes, then retry.",
+            suggested_args_patch={"condition": normalized.translate(str.maketrans({"“": '"', "”": '"', "‘": "'", "’": "'"}))},
+        )
+    if "；" in normalized:
+        return CsmarMcpError(
+            "invalid_condition",
+            "The condition contains a full-width semicolon which CSMAR does not accept.",
+            hint="Remove the full-width semicolon and retry.",
+            suggested_args_patch={"condition": normalized.replace("；", "")},
+        )
+    return None
+
+
+def _rate_limited_error(remaining_seconds: int) -> ToolError:
+    return ToolError(
+        code="rate_limited",
+        message="CSMAR is cooling down the same query.",
+        hint="Retry after the cooldown expires or change the condition or date range.",
+        retry_after_seconds=remaining_seconds,
+    )
+
+
+def _enrich_error(
+    client: CsmarClient,
+    error: CsmarMcpError,
+    *,
+    table_code: str | None = None,
+    columns: list[str] | None = None,
+    database_name: str | None = None,
+    condition: str | None = None,
+) -> ToolError:
+    candidate_values = list(error.candidate_values) if error.candidate_values else None
+    suggested_args_patch = dict(error.suggested_args_patch) if error.suggested_args_patch else None
+    hint = error.hint or "Review the arguments and retry."
+
+    if error.error_code == "table_not_found" and table_code:
+        candidate_values = client.suggest_tables(table_code, database_name=database_name) or None
+        hint = "Use one of the suggested table codes, then retry."
+    elif error.error_code == "field_not_found" and table_code and columns:
+        candidate_values = candidate_values or client.suggest_fields(table_code, columns) or None
+        hint = "Use csmar_get_table_schema to inspect the field list, then retry with valid columns."
+    elif error.error_code == "invalid_condition":
+        hint = "Fix the condition syntax and retry. Example: use '=' instead of '=='."
+        if suggested_args_patch is None and condition:
+            local_issue = _local_condition_error(condition)
+            if local_issue is not None:
+                suggested_args_patch = local_issue.suggested_args_patch
+                hint = local_issue.hint or hint
+
+    return ToolError(
+        code=error.error_code,
+        message=error.message,
+        hint=hint,
+        retry_after_seconds=error.retry_after_seconds,
+        candidate_values=candidate_values,
+        suggested_args_patch=suggested_args_patch,
+    )
+
+
+def _filter_fields(fields: list[str], field_query: str | None) -> list[str]:
+    if field_query is None:
+        return fields
+    needle = field_query.lower()
+    return [field for field in fields if needle in field.lower()]
+
+
+def _filter_preview_rows(rows: list[dict[str, Any]], preview_columns: list[str]) -> list[dict[str, Any]]:
+    filtered_rows: list[dict[str, Any]] = []
+    for row in rows:
+        filtered_rows.append({column: row.get(column) for column in preview_columns})
+    return filtered_rows
 
 
 mcp = FastMCP(
     name="csmar_mcp",
     instructions=(
-        "CSMAR MCP 服务器，用于元数据发现、轻量级探测查询和下载打包文件到本地。"
-        "使用流程：1. csmar_list_databases 获取数据库列表 -> "
-        "2. csmar_list_tables 获取表列表（返回 table_code 用于后续操作）-> "
-        "3. csmar_describe_table 查看表结构 -> "
-        "4. csmar_probe_queries 探测查询可行性 -> "
-        "5. csmar_materialize_downloads 下载数据。"
-        "注意：查询时日期范围需在 5 年内。"
+        "Lean CSMAR MCP for agent workflows. Use csmar_catalog_search to find candidate tables, "
+        "csmar_get_table_schema to inspect fields, csmar_query_validate before downloading, and "
+        "csmar_download_materialize only after validation succeeds. Tools return concise structured "
+        "JSON and short repair hints on failure."
     ),
     json_response=True,
 )
 
 
 @mcp.tool(
-    name="csmar_list_databases",
+    name="csmar_catalog_search",
+    description="Find candidate CSMAR tables by business topic, table code, or table name. Use this first when you do not already know the table_code.",
     annotations=ToolAnnotations(
-        title="列出已购数据库",
+        title="Search CSMAR Catalog",
         readOnlyHint=True,
         destructiveHint=False,
         idempotentHint=True,
         openWorldHint=True,
     ),
 )
-def csmar_list_databases() -> ListDatabasesOutput:
-    """列出当前账号已购买的 CSMAR 数据库。"""
-    client = get_client()
+def csmar_catalog_search(query: str, database_name: str | None = None, limit: int = 10) -> CallToolResult:
     try:
-        databases = client.list_databases()
-        return ListDatabasesOutput(databases=databases)
-    except CsmarMcpError as error:
-        raise RuntimeError(_format_tool_error(error)) from error
-
-
-@mcp.tool(
-    name="csmar_list_tables",
-    annotations=ToolAnnotations(
-        title="列出数据库中的表",
-        readOnlyHint=True,
-        destructiveHint=False,
-        idempotentHint=True,
-        openWorldHint=True,
-    ),
-)
-def csmar_list_tables(params: ListTablesInput) -> ListTablesOutput:
-    """列出指定数据库下的所有表，返回表代码（table_code）和中文名（table_name）。
-    后续查询和下载操作需要使用 table_code 字段。"""
-    client = get_client()
-    try:
-        tables = client.list_tables(params.database_name)
-        return ListTablesOutput(database_name=params.database_name, tables=tables)
-    except CsmarMcpError as error:
-        raise RuntimeError(_format_tool_error(error)) from error
-
-
-@mcp.tool(
-    name="csmar_describe_table",
-    annotations=ToolAnnotations(
-        title="描述表结构",
-        readOnlyHint=True,
-        destructiveHint=False,
-        idempotentHint=True,
-        openWorldHint=True,
-    ),
-)
-def csmar_describe_table(params: DescribeTableInput) -> DescribeTableOutput:
-    """返回表的字段列表和预览数据。table_name 参数应使用 csmar_list_tables 返回的 table_code。"""
-    client = get_client()
-    try:
-        fields = client.list_fields(params.table_name)
-        preview_rows = []
-        preview_truncated = False
-
-        if params.preview_rows > 0:
-            raw_preview_rows = client.preview(params.table_name)
-            preview_rows = raw_preview_rows[: params.preview_rows]
-            preview_truncated = len(raw_preview_rows) > params.preview_rows
-
-        return DescribeTableOutput(
-            table_name=params.table_name,
-            fields=fields,
-            preview_rows=preview_rows,
-            preview_truncated=preview_truncated,
+        params = CatalogSearchInput.model_validate(
+            {"query": query, "database_name": database_name, "limit": limit}
         )
+    except ValidationError as error:
+        return _invalid_arguments(error)
+
+    client = get_client()
+    try:
+        result = CatalogSearchOutput(items=client.search_catalog(params.query, params.database_name, params.limit))
+        return _success(result.as_dict(), f"Returned {len(result.items)} matching tables.")
     except CsmarMcpError as error:
-        raise RuntimeError(_format_tool_error(error)) from error
+        return _failure(_enrich_error(client, error, database_name=params.database_name))
 
 
 @mcp.tool(
-    name="csmar_probe_queries",
+    name="csmar_get_table_schema",
+    description="Inspect a table schema and optionally fetch a tiny preview. Use this after catalog search and before validate or download.",
     annotations=ToolAnnotations(
-        title="探测查询可行性",
+        title="Get Table Schema",
         readOnlyHint=True,
         destructiveHint=False,
         idempotentHint=True,
         openWorldHint=True,
     ),
 )
-def csmar_probe_queries(
-    params: ProbeQueriesInput | None = None,
-    queries: list[ProbeQuery] | None = None,
-    table_name: str | None = None,
-    columns: list[str] | None = None,
+def csmar_get_table_schema(
+    table_code: str,
+    field_query: str | None = None,
+    preview_columns: list[str] | None = None,
+    preview_rows: int = 0,
+) -> CallToolResult:
+    try:
+        params = GetTableSchemaInput.model_validate(
+            {
+                "table_code": table_code,
+                "field_query": field_query,
+                "preview_columns": preview_columns,
+                "preview_rows": preview_rows,
+            }
+        )
+    except ValidationError as error:
+        return _invalid_arguments(error)
+
+    client = get_client()
+    try:
+        schema = client.read_table_schema(params.table_code)
+        filtered_fields = _filter_fields(schema.fields, params.field_query)
+        payload = TableSchemaOutput(
+            table_code=params.table_code,
+            field_count=len(filtered_fields),
+            fields=filtered_fields,
+        )
+
+        if params.preview_rows > 0 and params.preview_columns:
+            preview = client.preview(params.table_code)[: params.preview_rows]
+            payload.preview_rows = _filter_preview_rows(preview, params.preview_columns)
+
+        return _success(payload.as_dict(), f"Returned {payload.field_count} fields for {params.table_code}.")
+    except CsmarMcpError as error:
+        return _failure(_enrich_error(client, error, table_code=params.table_code))
+
+
+@mcp.tool(
+    name="csmar_query_validate",
+    description="Validate a query before download. Use this to confirm fields, condition syntax, row count, and a tiny sample.",
+    annotations=ToolAnnotations(
+        title="Validate Query",
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    ),
+)
+def csmar_query_validate(
+    table_code: str,
+    columns: list[str],
     condition: str | None = None,
     start_date: str | None = None,
     end_date: str | None = None,
-    sample_rows: int | None = None,
-    probe_id: str | None = None,
-) -> ProbeQueriesOutput:
-    """探测 CSMAR 查询可行性，返回字段校验、记录数与样本数据。
-
-    调用入口兼容：
-    - 顶层参数：直接传 table_name/columns/.../sample_rows
-    - 兼容参数：传 params={...}
-
-    支持两种参数格式（任选其一）：
-    1) 批量格式
-    {
-        "queries": [
+    sample_rows: int = 3,
+) -> CallToolResult:
+    try:
+        params = QueryValidateInput.model_validate(
             {
-                "probe_id": "q1",
-                "table_name": "FS_Combas",
-                "columns": ["Stkcd", "ShortName", "Accper"],
-                "condition": "Stkcd='000001'",
-                "start_date": "2020-01-01",
-                "end_date": "2024-12-31"
+                "table_code": table_code,
+                "columns": columns,
+                "condition": condition,
+                "start_date": start_date,
+                "end_date": end_date,
+                "sample_rows": sample_rows,
             }
-        ],
-        "sample_rows": 5
-    }
+        )
+    except ValidationError as error:
+        return _invalid_arguments(error)
 
-    2) 扁平单查询格式
-    {
-        "table_name": "FS_Combas",
-        "columns": ["Stkcd", "ShortName", "Accper"],
-        "condition": "Stkcd='000001'",
-        "start_date": "2020-01-01",
-        "end_date": "2024-12-31",
-        "sample_rows": 5
-    }
-
-    返回字段包含：
-    - columns_exist / missing_columns（字段校验）
-    - match_count / sample_rows（统计与样本）
-    - columns_valid / record_count / sample / can_download（简化字段）
-
-    限制：日期范围（start_date 到 end_date）需在 5 年内。
-    """
-    normalized_params = _normalize_probe_params(
-        params,
-        queries=queries,
-        table_name=table_name,
-        columns=columns,
-        condition=condition,
-        start_date=start_date,
-        end_date=end_date,
-        sample_rows=sample_rows,
-        probe_id=probe_id,
-    )
+    if params.condition:
+        local_issue = _local_condition_error(params.condition)
+        if local_issue is not None:
+            return _failure(_enrich_error(get_client(), local_issue, condition=params.condition))
 
     client = get_client()
-    table_fields_cache: dict[str, set[str]] = {}
-    results: list[ProbeResult] = []
-    warnings: list[str] = []
+    cache_key = client.build_cache_key(
+        table_code=params.table_code,
+        columns=params.columns,
+        condition=params.condition,
+        start_date=params.start_date,
+        end_date=params.end_date,
+    )
+    remaining_seconds = client.get_rate_limit_remaining_seconds(cache_key)
+    if remaining_seconds is not None:
+        cached = client.get_cached_validation(cache_key)
+        if cached is not None:
+            return _success(cached.as_dict(), f"Returned cached validation for {params.table_code}.")
+        return _failure(_rate_limited_error(remaining_seconds))
 
-    for query in normalized_params.queries or []:
-        cache_key = client.build_probe_cache_key(query)
-        cached_result = client.get_cached_probe(cache_key)
-        if cached_result is not None:
-            results.append(cached_result)
-            warnings.append(f"probe_id={query.probe_id}: used cached probe result")
-            continue
-
-        remaining_seconds = client.get_rate_limit_remaining_seconds(cache_key)
-        if remaining_seconds is not None:
-            results.append(
-                ProbeResult(
-                    probe_id=query.probe_id,
-                    table_name=query.table_name,
-                    columns_exist=False,
-                    missing_columns=[],
-                    match_count=None,
-                    sample_rows=[],
-                    sample_truncated=False,
-                    accessible=False,
-                    error_code="rate_limited",
-                    failure_reason=_build_cooldown_reason(remaining_seconds),
-                )
+    try:
+        result = client.validate_query(params)
+        return _success(result.as_dict(), f"Validated query for {params.table_code}: {result.row_count} matching rows.")
+    except CsmarMcpError as error:
+        if error.error_code == "rate_limited":
+            client.mark_rate_limited(cache_key)
+            cached = client.get_cached_validation(cache_key)
+            if cached is not None:
+                return _success(cached.as_dict(), f"Returned cached validation for {params.table_code}.")
+            error.retry_after_seconds = client.get_rate_limit_remaining_seconds(cache_key)
+        return _failure(
+            _enrich_error(
+                client,
+                error,
+                table_code=params.table_code,
+                columns=params.columns,
+                condition=params.condition,
             )
-            warnings.append(
-                f"probe_id={query.probe_id}: local cooldown active, skipped upstream request"
-            )
-            continue
-
-        try:
-            if query.table_name not in table_fields_cache:
-                table_fields_cache[query.table_name] = set(client.list_fields(query.table_name))
-
-            table_fields = table_fields_cache[query.table_name]
-            missing_columns = [column for column in query.columns if column not in table_fields]
-            if missing_columns:
-                result = ProbeResult(
-                    probe_id=query.probe_id,
-                    table_name=query.table_name,
-                    columns_exist=False,
-                    missing_columns=missing_columns,
-                    match_count=None,
-                    sample_rows=[],
-                    sample_truncated=False,
-                    accessible=True,
-                    error_code="field_not_found",
-                    failure_reason="Some requested columns do not exist in the table",
-                )
-                results.append(result)
-                continue
-
-            match_count = client.query_count(
-                table_name=query.table_name,
-                columns=query.columns,
-                condition=query.condition,
-                start_date=query.start_date,
-                end_date=query.end_date,
-            )
-
-            sample_data_rows: list[dict[str, Any]] = []
-            if normalized_params.sample_rows > 0 and match_count > 0:
-                sample_data_rows = client.query_sample(
-                    table_name=query.table_name,
-                    columns=query.columns,
-                    sample_rows=normalized_params.sample_rows,
-                    condition=query.condition,
-                    start_date=query.start_date,
-                    end_date=query.end_date,
-                )
-
-            result = ProbeResult(
-                probe_id=query.probe_id,
-                table_name=query.table_name,
-                columns_exist=True,
-                missing_columns=[],
-                match_count=match_count,
-                sample_rows=sample_data_rows,
-                sample_truncated=match_count > len(sample_data_rows),
-                accessible=True,
-            )
-            client.set_cached_probe(cache_key, result)
-            results.append(result)
-
-        except CsmarMcpError as error:
-            if error.error_code == "rate_limited":
-                client.mark_rate_limited(cache_key)
-                cached_result = client.get_cached_probe(cache_key)
-                if cached_result is not None:
-                    results.append(cached_result)
-                    warnings.append(
-                        f"probe_id={query.probe_id}: request rate-limited, reused cached probe result"
-                    )
-                    continue
-
-            results.append(
-                ProbeResult(
-                    probe_id=query.probe_id,
-                    table_name=query.table_name,
-                    columns_exist=False,
-                    missing_columns=[],
-                    match_count=None,
-                    sample_rows=[],
-                    sample_truncated=False,
-                    accessible=False,
-                    error_code=error.error_code,
-                    failure_reason=error.message,
-                )
-            )
-
-    return ProbeQueriesOutput(results=results, warnings=warnings)
+        )
 
 
 @mcp.tool(
-    name="csmar_materialize_downloads",
+    name="csmar_download_materialize",
+    description="Download a validated query to local files. Use this only after csmar_query_validate succeeds.",
     annotations=ToolAnnotations(
-        title="下载并物化数据",
+        title="Download And Materialize",
         readOnlyHint=False,
         destructiveHint=False,
         idempotentHint=False,
         openWorldHint=True,
     ),
 )
-def csmar_materialize_downloads(
-    params: MaterializeDownloadsInput | None = None,
-    downloads: list[DownloadPlan] | None = None,
-    plans: list[DownloadPlan] | None = None,
-    output_dir: str | None = None,
-    table_name: str | None = None,
-    columns: list[str] | None = None,
+def csmar_download_materialize(
+    table_code: str,
+    columns: list[str],
+    output_dir: str,
     condition: str | None = None,
     start_date: str | None = None,
     end_date: str | None = None,
     download_id: str | None = None,
-    plan_id: str | None = None,
-) -> MaterializeDownloadsOutput:
-    """下载数据到指定目录，返回 ZIP 与解压后的本地产物清单。
-
-    调用入口兼容：
-    - 顶层参数：直接传 table_name/columns/output_dir/...；
-    - 兼容参数：传 params={...}。
-
-    支持两种参数格式（任选其一）：
-    1) 批量格式（推荐字段名 downloads，兼容历史字段 plans）
-    {
-      "downloads": [
-        {
-          "download_id": "dl_001",
-          "table_name": "FS_Combas",
-          "columns": ["Stkcd", "ShortName", "Accper"],
-          "condition": "Stkcd='000001'",
-          "start_date": "2020-01-01",
-          "end_date": "2024-12-31"
+) -> CallToolResult:
+    try:
+        payload: dict[str, Any] = {
+            "table_code": table_code,
+            "columns": columns,
+            "output_dir": output_dir,
+            "condition": condition,
+            "start_date": start_date,
+            "end_date": end_date,
         }
-      ],
-      "output_dir": "D:/tmp/csmar"
-    }
+        if download_id is not None:
+            payload["download_id"] = download_id
+        params = DownloadMaterializeInput.model_validate(payload)
+    except ValidationError as error:
+        return _invalid_arguments(error)
 
-    2) 扁平单下载格式
-    {
-      "table_name": "FS_Combas",
-      "columns": ["Stkcd", "ShortName", "Accper"],
-      "condition": "Stkcd='000001'",
-      "start_date": "2020-01-01",
-      "end_date": "2024-12-31",
-      "output_dir": "D:/tmp/csmar"
-    }
-
-    返回 artifacts 中的主标识为 download_id，并保留 plan_id 兼容字段。
-    限制：日期范围（start_date 到 end_date）需在 5 年内。
-    """
-    normalized_params = _normalize_download_params(
-        params,
-        downloads=downloads,
-        plans=plans,
-        output_dir=output_dir,
-        table_name=table_name,
-        columns=columns,
-        condition=condition,
-        start_date=start_date,
-        end_date=end_date,
-        download_id=download_id,
-        plan_id=plan_id,
-    )
+    if params.condition:
+        local_issue = _local_condition_error(params.condition)
+        if local_issue is not None:
+            return _failure(_enrich_error(get_client(), local_issue, condition=params.condition))
 
     client = get_client()
-    artifacts: list[DownloadArtifact] = []
-    warnings: list[str] = []
+    cache_key = client.build_cache_key(
+        table_code=params.table_code,
+        columns=params.columns,
+        condition=params.condition,
+        start_date=params.start_date,
+        end_date=params.end_date,
+    )
+    remaining_seconds = client.get_rate_limit_remaining_seconds(cache_key)
+    if remaining_seconds is not None:
+        cached = client.get_cached_manifest(cache_key)
+        if cached is not None:
+            output = client.materialize_download(params, max_retries=0)
+            return _success(output.as_dict(), f"Returned cached download for {params.table_code}.")
+        return _failure(_rate_limited_error(remaining_seconds))
 
-    for plan in normalized_params.downloads or []:
-        cache_key = client.build_download_cache_key(plan)
-
-        remaining_seconds = client.get_rate_limit_remaining_seconds(cache_key)
-        if remaining_seconds is not None:
-            artifacts.append(
-                DownloadArtifact(
-                    download_id=plan.download_id,
-                    table_name=plan.table_name,
-                    status="failed",
-                    zip_path=None,
-                    extract_dir=None,
-                    files=[],
-                    retry_count=0,
-                    error_code="rate_limited",
-                    failure_reason=_build_cooldown_reason(remaining_seconds),
-                )
-            )
-            warnings.append(
-                f"download_id={plan.download_id}: local cooldown active, skipped upstream request"
-            )
-            continue
-
-        try:
-            artifact = client.materialize_download(plan, normalized_params.output_dir, max_retries=2)
-            artifacts.append(artifact)
-            if artifact.status == "cached":
-                warnings.append(f"download_id={plan.download_id}: used cached download artifact")
-        except CsmarMcpError as error:
-            if error.error_code == "rate_limited":
-                client.mark_rate_limited(cache_key)
-                cached_artifact = client.get_cached_download(cache_key)
-                if cached_artifact is not None:
-                    cached_artifact.status = "cached"
-                    artifacts.append(cached_artifact)
-                    warnings.append(
-                        f"download_id={plan.download_id}: request rate-limited, reused cached artifact"
-                    )
-                    continue
-
-            artifacts.append(
-                DownloadArtifact(
-                    download_id=plan.download_id,
-                    table_name=plan.table_name,
-                    status="failed",
-                    zip_path=None,
-                    extract_dir=None,
-                    files=[],
-                    retry_count=0,
-                    error_code=error.error_code,
-                    failure_reason=error.message,
+    try:
+        available_fields = set(client.list_fields(params.table_code))
+        missing_columns = [column for column in params.columns if column not in available_fields]
+        if missing_columns:
+            return _failure(
+                ToolError(
+                    code="field_not_found",
+                    message="One or more requested columns do not exist in the table.",
+                    hint="Use csmar_get_table_schema to inspect the field list, then retry with valid columns.",
+                    candidate_values=client.suggest_fields(params.table_code, missing_columns) or None,
                 )
             )
 
-    return MaterializeDownloadsOutput(artifacts=artifacts, warnings=warnings)
+        result = client.materialize_download(params)
+        return _success(result.as_dict(), f"Materialized download {result.download_id} with {result.file_count} files.")
+    except CsmarMcpError as error:
+        if error.error_code == "rate_limited":
+            client.mark_rate_limited(cache_key)
+            cached = client.get_cached_manifest(cache_key)
+            if cached is not None:
+                output = client.materialize_download(params, max_retries=0)
+                return _success(output.as_dict(), f"Returned cached download for {params.table_code}.")
+            error.retry_after_seconds = client.get_rate_limit_remaining_seconds(cache_key)
+        return _failure(
+            _enrich_error(
+                client,
+                error,
+                table_code=params.table_code,
+                columns=params.columns,
+                condition=params.condition,
+            )
+        )
+
+
+@mcp.resource(
+    "csmar://table/{table_code}/schema",
+    name="csmar_table_schema_resource",
+    description="Read the full field list for a table after you already know the table_code.",
+    mime_type="application/json",
+)
+def csmar_table_schema_resource(table_code: str) -> str:
+    client = get_client()
+    schema = client.read_table_schema(table_code)
+    return _json_text(schema.as_dict())
+
+
+@mcp.resource(
+    "csmar://artifacts/{download_id}/manifest",
+    name="csmar_artifact_manifest_resource",
+    description="Read the full extracted file list for a completed download.",
+    mime_type="application/json",
+)
+def csmar_artifact_manifest_resource(download_id: str) -> str:
+    client = get_client()
+    manifest = client.get_download_manifest(download_id)
+    if manifest is None:
+        raise RuntimeError("Unknown download_id. Call csmar_download_materialize first.")
+    return _json_text(manifest.as_dict())
+
+
+@mcp.prompt(
+    name="repair_csmar_request",
+    description="Use this prompt after a CSMAR tool error to produce a concrete retry plan.",
+)
+def repair_csmar_request(
+    error_code: str,
+    tool_name: str,
+    last_arguments: str | None = None,
+    message: str | None = None,
+) -> list[PromptMessage]:
+    parts = [
+        f"You are repairing a failed call to `{tool_name}`.",
+        f"Error code: `{error_code}`.",
+    ]
+    if message:
+        parts.append(f"Short error message: {message}")
+    if last_arguments:
+        parts.append(f"Last arguments: {last_arguments}")
+    parts.append(
+        "Produce a concise retry plan with: 1) root cause guess, 2) minimal argument changes, 3) the exact next tool call."
+    )
+    return [PromptMessage(role="user", content=_text("\n".join(parts)))]
 
 
 def main(argv: Sequence[str] | None = None) -> None:

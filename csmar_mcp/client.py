@@ -7,6 +7,7 @@ import time
 import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from difflib import SequenceMatcher, get_close_matches
 from pathlib import Path
 from typing import Any, Callable
 from urllib import parse
@@ -15,7 +16,16 @@ import urllib3
 
 from csmarapi.CsmarService import CsmarService
 
-from .models import DownloadArtifact, DownloadPlan, ProbeQuery, ProbeResult, TableInfo
+from .models import (
+    CatalogItem,
+    DownloadManifest,
+    DownloadMaterializeInput,
+    DownloadMaterializeOutput,
+    QueryValidateInput,
+    QueryValidateOutput,
+    TableSchemaOutput,
+    ToolError,
+)
 
 
 @dataclass(slots=True)
@@ -25,11 +35,44 @@ class CacheEntry:
 
 
 class CsmarMcpError(Exception):
-    def __init__(self, error_code: str, message: str, upstream_code: int | None = None) -> None:
+    def __init__(
+        self,
+        error_code: str,
+        message: str,
+        *,
+        hint: str | None = None,
+        upstream_code: int | None = None,
+        retry_after_seconds: int | None = None,
+        candidate_values: list[str] | None = None,
+        suggested_args_patch: dict[str, Any] | None = None,
+        raw_message: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.error_code = error_code
         self.message = message
+        self.hint = hint
         self.upstream_code = upstream_code
+        self.retry_after_seconds = retry_after_seconds
+        self.candidate_values = candidate_values
+        self.suggested_args_patch = suggested_args_patch
+        self.raw_message = raw_message
+
+    def to_tool_error(self) -> ToolError:
+        return ToolError(
+            code=self.error_code,
+            message=self.message,
+            hint=self.hint or "Review the arguments and retry.",
+            retry_after_seconds=self.retry_after_seconds,
+            candidate_values=self.candidate_values,
+            suggested_args_patch=self.suggested_args_patch,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class CatalogRecord:
+    database_name: str
+    table_code: str
+    table_name: str
 
 
 class CsmarClient:
@@ -51,54 +94,189 @@ class CsmarClient:
         self._service = CsmarService()
         self._http = urllib3.PoolManager()
         self._lock = threading.RLock()
-        self._probe_cache: dict[str, CacheEntry] = {}
+        self._catalog_cache: dict[str, CacheEntry] = {}
+        self._validation_cache: dict[str, CacheEntry] = {}
         self._download_cache: dict[str, CacheEntry] = {}
         self._rate_limit_cooldowns: dict[str, datetime] = {}
+        self._download_manifests: dict[str, DownloadManifest] = {}
 
         self._cache_ttl = timedelta(minutes=max(1, cache_ttl_minutes))
         self._poll_interval_seconds = max(1, poll_interval_seconds)
         self._poll_timeout_seconds = max(30, poll_timeout_seconds)
         self._logged_in = False
 
-    def build_probe_cache_key(self, query: ProbeQuery) -> str:
-        return self._build_cache_key(
-            table_name=query.table_name,
-            columns=query.columns,
-            condition=query.condition,
-            start_date=query.start_date,
-            end_date=query.end_date,
+    def list_databases(self) -> list[str]:
+        response = self._get(self._service.urlUtil.getListDbsUrl(), include_belong=True)
+        return self._deduplicate(
+            self._normalize_name_list(response.get("data"), dict_name_keys=("dbName", "databaseName", "name", "value"))
         )
 
-    def build_download_cache_key(self, plan: DownloadPlan) -> str:
-        return self._build_cache_key(
-            table_name=plan.table_name,
-            columns=plan.columns,
-            condition=plan.condition,
-            start_date=plan.start_date,
-            end_date=plan.end_date,
+    def list_tables(self, database_name: str) -> list[CatalogRecord]:
+        cache_key = f"tables::{database_name.strip()}"
+
+        with self._lock:
+            cached = self._get_cache_value(self._catalog_cache, cache_key)
+            if cached is not None:
+                return list(cached)
+
+        encoded_database_name = parse.quote(database_name)
+        endpoint = f"{self._service.urlUtil.getListTablesUrl()}?dbName={encoded_database_name}"
+        response = self._get(endpoint, include_belong=True)
+        table_records = self._normalize_table_list(database_name, response.get("data", []))
+
+        with self._lock:
+            self._catalog_cache[cache_key] = CacheEntry(created_at=self._now(), value=list(table_records))
+
+        return table_records
+
+    def search_catalog(self, query: str, database_name: str | None = None, limit: int = 10) -> list[CatalogItem]:
+        normalized_query = query.strip().lower()
+        databases = [database_name] if database_name else self.list_databases()
+        matches: list[tuple[float, CatalogItem]] = []
+
+        for db_name in databases:
+            for record in self.list_tables(db_name):
+                scored = self._score_catalog_match(record, normalized_query)
+                if scored is None:
+                    continue
+                score, why_matched = scored
+                matches.append(
+                    (
+                        score,
+                        CatalogItem(
+                            table_code=record.table_code,
+                            table_name=record.table_name,
+                            database_name=record.database_name,
+                            why_matched=why_matched,
+                        ),
+                    )
+                )
+
+        if not matches:
+            fallback_matches: list[tuple[float, CatalogItem]] = []
+            for db_name in databases:
+                for record in self.list_tables(db_name):
+                    ratio = max(
+                        SequenceMatcher(None, normalized_query, record.table_code.lower()).ratio(),
+                        SequenceMatcher(None, normalized_query, record.table_name.lower()).ratio(),
+                    )
+                    if ratio < 0.35:
+                        continue
+                    fallback_matches.append(
+                        (
+                            ratio,
+                            CatalogItem(
+                                table_code=record.table_code,
+                                table_name=record.table_name,
+                                database_name=record.database_name,
+                                why_matched="similar to the search text",
+                            ),
+                        )
+                    )
+            matches = fallback_matches
+
+        matches.sort(key=lambda item: (-item[0], item[1].table_code))
+        return [item for _, item in matches[:limit]]
+
+    def list_fields(self, table_code: str) -> list[str]:
+        encoded_table_name = parse.quote(table_code)
+        endpoint = f"{self._service.urlUtil.getListFieldsUrl()}?table={encoded_table_name}"
+        response = self._get(endpoint, include_belong=True)
+        return self._deduplicate(
+            self._normalize_name_list(
+                response.get("data"),
+                dict_name_keys=("field", "fieldName", "name", "columnName", "column", "value"),
+            )
         )
 
-    def get_cached_probe(self, cache_key: str) -> ProbeResult | None:
-        with self._lock:
-            value = self._get_cache_value(self._probe_cache, cache_key)
-            return value.model_copy(deep=True) if value else None
+    def read_table_schema(self, table_code: str) -> TableSchemaOutput:
+        fields = self.list_fields(table_code)
+        return TableSchemaOutput(table_code=table_code, field_count=len(fields), fields=fields)
 
-    def set_cached_probe(self, cache_key: str, result: ProbeResult) -> None:
-        with self._lock:
-            self._probe_cache[cache_key] = CacheEntry(created_at=self._now(), value=result.model_copy(deep=True))
+    def suggest_tables(self, table_code: str, database_name: str | None = None, limit: int = 5) -> list[str]:
+        records = self.search_catalog(table_code, database_name=database_name, limit=max(limit, 10))
+        suggestions = [f"{item.table_code} ({item.table_name})" for item in records]
+        if suggestions:
+            return suggestions[:limit]
 
-    def get_cached_download(self, cache_key: str) -> DownloadArtifact | None:
+        databases = [database_name] if database_name else self.list_databases()
+        code_pool: list[str] = []
+        for db_name in databases:
+            code_pool.extend(record.table_code for record in self.list_tables(db_name))
+
+        return get_close_matches(table_code, code_pool, n=limit, cutoff=0.3)
+
+    def suggest_fields(self, table_code: str, columns: list[str], limit: int = 5) -> list[str]:
+        field_pool = self.list_fields(table_code)
+        suggestions: list[str] = []
+        for column in columns:
+            for candidate in get_close_matches(column, field_pool, n=limit, cutoff=0.5):
+                if candidate not in suggestions:
+                    suggestions.append(candidate)
+        return suggestions[:limit]
+
+    def preview(self, table_code: str) -> list[dict[str, Any]]:
+        payload = {"table": table_code}
+        response = self._post(self._service.urlUtil.getPreviewUrl(), payload)
+        data = response.get("data", {})
+        preview_rows = data.get("previewDatas", []) if isinstance(data, dict) else []
+        return [row for row in preview_rows if isinstance(row, dict)]
+
+    def build_cache_key(
+        self,
+        *,
+        table_code: str,
+        columns: list[str],
+        condition: str | None,
+        start_date: str | None,
+        end_date: str | None,
+    ) -> str:
+        normalized_condition = self._normalize_condition(condition)
+        normalized_columns = ",".join(columns)
+        return "|".join(
+            [
+                table_code.strip(),
+                normalized_columns,
+                normalized_condition,
+                (start_date or "").strip(),
+                (end_date or "").strip(),
+            ]
+        )
+
+    def get_cached_validation(self, cache_key: str) -> QueryValidateOutput | None:
         with self._lock:
-            value = self._get_cache_value(self._download_cache, cache_key)
-            if value and self._artifact_exists(value):
-                return value.model_copy(deep=True)
-            if value:
-                self._download_cache.pop(cache_key, None)
+            cached = self._get_cache_value(self._validation_cache, cache_key)
+            return cached.model_copy(deep=True) if cached is not None else None
+
+    def set_cached_validation(self, cache_key: str, result: QueryValidateOutput) -> None:
+        with self._lock:
+            self._validation_cache[cache_key] = CacheEntry(created_at=self._now(), value=result.model_copy(deep=True))
+
+    def get_cached_manifest(self, cache_key: str) -> DownloadManifest | None:
+        with self._lock:
+            cached = self._get_cache_value(self._download_cache, cache_key)
+            if cached is None:
+                return None
+            if self._manifest_exists(cached):
+                return cached.model_copy(deep=True)
+            self._download_cache.pop(cache_key, None)
             return None
 
-    def set_cached_download(self, cache_key: str, artifact: DownloadArtifact) -> None:
+    def set_cached_manifest(self, cache_key: str, manifest: DownloadManifest) -> None:
         with self._lock:
-            self._download_cache[cache_key] = CacheEntry(created_at=self._now(), value=artifact.model_copy(deep=True))
+            manifest_copy = manifest.model_copy(deep=True)
+            self._download_cache[cache_key] = CacheEntry(created_at=self._now(), value=manifest_copy)
+            self._download_manifests[manifest.download_id] = manifest_copy
+
+    def get_download_manifest(self, download_id: str) -> DownloadManifest | None:
+        with self._lock:
+            manifest = self._download_manifests.get(download_id)
+            if manifest is None:
+                return None
+            if not self._manifest_exists(manifest):
+                self._download_manifests.pop(download_id, None)
+                return None
+            return manifest.model_copy(deep=True)
 
     def mark_rate_limited(self, cache_key: str) -> None:
         with self._lock:
@@ -117,94 +295,65 @@ class CsmarClient:
 
             return remaining_seconds
 
-    def list_databases(self) -> list[str]:
-        response = self._get(self._service.urlUtil.getListDbsUrl(), include_belong=True)
-        return self._deduplicate(
-            self._normalize_name_list(response.get("data"), dict_name_keys=("dbName", "databaseName", "name", "value"))
+    def validate_query(self, request: QueryValidateInput) -> QueryValidateOutput:
+        cache_key = self.build_cache_key(
+            table_code=request.table_code,
+            columns=request.columns,
+            condition=request.condition,
+            start_date=request.start_date,
+            end_date=request.end_date,
         )
+        cached = self.get_cached_validation(cache_key)
+        if cached is not None:
+            return cached
 
-    def list_tables(self, database_name: str) -> list[TableInfo]:
-        encoded_database_name = parse.quote(database_name)
-        endpoint = f"{self._service.urlUtil.getListTablesUrl()}?dbName={encoded_database_name}"
-        response = self._get(endpoint, include_belong=True)
-        raw_data = response.get("data", [])
-        return self._normalize_table_list(raw_data)
-
-    def _normalize_table_list(self, values: Any) -> list[TableInfo]:
-        if not isinstance(values, list):
-            return []
-
-        table_infos: list[TableInfo] = []
-        seen_codes: set[str] = set()
-
-        for item in values:
-            if isinstance(item, str):
-                continue
-
-            if not isinstance(item, dict):
-                continue
-
-            table_code = None
-            table_name = None
-
-            for code_key in ("tableCode", "code", "table", "tableNameEn", "engName"):
-                raw_value = item.get(code_key)
-                if raw_value is not None and str(raw_value).strip():
-                    table_code = str(raw_value).strip()
-                    break
-
-            for name_key in ("tableName", "name", "tableNameCn", "cnName"):
-                raw_value = item.get(name_key)
-                if raw_value is not None and str(raw_value).strip():
-                    table_name = str(raw_value).strip()
-                    break
-
-            if table_code is None:
-                for key, raw_value in item.items():
-                    if raw_value is not None:
-                        text = str(raw_value).strip()
-                        if text:
-                            if key.lower().find("code") >= 0 or key.lower().find("en") >= 0:
-                                table_code = text
-                            elif key.lower().find("name") >= 0 or key.lower().find("cn") >= 0:
-                                table_name = text
-
-            if table_code and table_code not in seen_codes:
-                seen_codes.add(table_code)
-                table_infos.append(TableInfo(
-                    table_code=table_code,
-                    table_name=table_name or table_code,
-                ))
-
-        return table_infos
-
-    def list_fields(self, table_name: str) -> list[str]:
-        encoded_table_name = parse.quote(table_name)
-        endpoint = f"{self._service.urlUtil.getListFieldsUrl()}?table={encoded_table_name}"
-        response = self._get(endpoint, include_belong=True)
-        return self._deduplicate(
-            self._normalize_name_list(
-                response.get("data"),
-                dict_name_keys=("field", "fieldName", "name", "columnName", "column", "value"),
+        table_fields = set(self.list_fields(request.table_code))
+        missing_columns = [column for column in request.columns if column not in table_fields]
+        if missing_columns:
+            raise CsmarMcpError(
+                "field_not_found",
+                "One or more requested columns do not exist in the table.",
+                hint="Use csmar_get_table_schema to inspect the table fields, then retry with valid columns.",
+                candidate_values=self.suggest_fields(request.table_code, missing_columns),
             )
+
+        row_count = self.query_count(
+            table_code=request.table_code,
+            columns=request.columns,
+            condition=request.condition,
+            start_date=request.start_date,
+            end_date=request.end_date,
         )
 
-    def preview(self, table_name: str) -> list[dict[str, Any]]:
-        payload = {"table": table_name}
-        response = self._post(self._service.urlUtil.getPreviewUrl(), payload)
-        data = response.get("data", {})
-        preview_rows = data.get("previewDatas", []) if isinstance(data, dict) else []
-        return [row for row in preview_rows if isinstance(row, dict)]
+        sample_rows: list[dict[str, Any]] | None = None
+        if request.sample_rows > 0 and row_count > 0:
+            sample_rows = self.query_sample(
+                table_code=request.table_code,
+                columns=request.columns,
+                sample_rows=request.sample_rows,
+                condition=request.condition,
+                start_date=request.start_date,
+                end_date=request.end_date,
+            )
+
+        result = QueryValidateOutput(
+            table_code=request.table_code,
+            row_count=row_count,
+            sample_rows=sample_rows or None,
+            can_download=row_count > 0,
+        )
+        self.set_cached_validation(cache_key, result)
+        return result
 
     def query_count(
         self,
-        table_name: str,
+        table_code: str,
         columns: list[str],
         condition: str | None = None,
         start_date: str | None = None,
         end_date: str | None = None,
     ) -> int:
-        payload = self._build_query_payload(table_name, columns, condition, start_date, end_date)
+        payload = self._build_query_payload(table_code, columns, condition, start_date, end_date)
         response = self._post(self._service.urlUtil.getQueryCountUrl(), payload)
         count_value = response.get("data", 0)
         try:
@@ -212,12 +361,14 @@ class CsmarClient:
         except (TypeError, ValueError) as error:
             raise CsmarMcpError(
                 "upstream_error",
-                f"Unexpected count result type from CSMAR: {count_value!r}",
+                "CSMAR returned an unexpected row count.",
+                hint="Retry the same request. If it fails again, narrow the query and inspect the schema first.",
+                raw_message=repr(count_value),
             ) from error
 
     def query_sample(
         self,
-        table_name: str,
+        table_code: str,
         columns: list[str],
         sample_rows: int,
         condition: str | None = None,
@@ -228,36 +379,39 @@ class CsmarClient:
             return []
 
         limited_condition = self._append_limit_clause(condition, sample_rows)
-        payload = self._build_query_payload(table_name, columns, limited_condition, start_date, end_date)
+        payload = self._build_query_payload(table_code, columns, limited_condition, start_date, end_date)
         response = self._post(self._service.urlUtil.getQueryUrl(), payload)
         data = response.get("data", {})
         rows = data.get("previewDatas", []) if isinstance(data, dict) else []
         normalized_rows = [row for row in rows if isinstance(row, dict)]
         return normalized_rows[:sample_rows]
 
-    def materialize_download(self, plan: DownloadPlan, output_dir: str, max_retries: int = 2) -> DownloadArtifact:
-        cache_key = self.build_download_cache_key(plan)
-        cached_artifact = self.get_cached_download(cache_key)
-        if cached_artifact:
-            cached_artifact.status = "cached"
-            cached_artifact.retry_count = 0
-            return cached_artifact
+    def materialize_download(self, request: DownloadMaterializeInput, max_retries: int = 2) -> DownloadMaterializeOutput:
+        cache_key = self.build_cache_key(
+            table_code=request.table_code,
+            columns=request.columns,
+            condition=request.condition,
+            start_date=request.start_date,
+            end_date=request.end_date,
+        )
+        cached_manifest = self.get_cached_manifest(cache_key)
+        if cached_manifest is not None:
+            aliased_manifest = self._alias_manifest(cached_manifest, request.download_id)
+            return self._manifest_to_output(aliased_manifest)
 
         last_error: CsmarMcpError | None = None
         for attempt in range(max(0, max_retries) + 1):
             try:
-                artifact = self._materialize_download_once(plan, output_dir)
-                artifact.retry_count = attempt
-                self.set_cached_download(cache_key, artifact)
-                return artifact
+                manifest = self._materialize_download_once(request)
+                self.set_cached_manifest(cache_key, manifest)
+                return self._manifest_to_output(manifest)
             except CsmarMcpError as error:
                 last_error = error
                 if error.error_code == "rate_limited":
-                    cached_artifact = self.get_cached_download(cache_key)
-                    if cached_artifact:
-                        cached_artifact.status = "cached"
-                        cached_artifact.retry_count = attempt
-                        return cached_artifact
+                    cached_manifest = self.get_cached_manifest(cache_key)
+                    if cached_manifest is not None:
+                        aliased_manifest = self._alias_manifest(cached_manifest, request.download_id)
+                        return self._manifest_to_output(aliased_manifest)
                     raise
 
                 if attempt >= max_retries:
@@ -265,33 +419,45 @@ class CsmarClient:
 
                 time.sleep(min(2 * (attempt + 1), 8))
 
-        if not last_error:
-            raise CsmarMcpError("download_failed", "Unknown download error")
+        if last_error is None:
+            raise CsmarMcpError(
+                "download_failed",
+                "The download did not complete.",
+                hint="Retry the download after validating the same query with csmar_query_validate.",
+            )
         raise last_error
 
-    def _materialize_download_once(self, plan: DownloadPlan, output_dir: str) -> DownloadArtifact:
+    def _materialize_download_once(self, request: DownloadMaterializeInput) -> DownloadManifest:
         payload = self._build_query_payload(
-            table_name=plan.table_name,
-            columns=plan.columns,
-            condition=plan.condition,
-            start_date=plan.start_date,
-            end_date=plan.end_date,
+            table_code=request.table_code,
+            columns=request.columns,
+            condition=request.condition,
+            start_date=request.start_date,
+            end_date=request.end_date,
         )
 
         pack_response = self._post(self._service.urlUtil.getPackUrl(), payload)
         sign_code = str(pack_response.get("data", "")).strip()
         if not sign_code:
-            raise CsmarMcpError("download_failed", "Pack request succeeded but no signCode was returned")
+            raise CsmarMcpError(
+                "download_failed",
+                "CSMAR did not return a package identifier.",
+                hint="Retry the download. If it fails again, validate the same query before downloading.",
+            )
 
         pack_result = self._poll_pack_result(sign_code)
         file_url = str(pack_result.get("filePath", "")).strip()
         if not file_url:
-            raise CsmarMcpError("download_failed", "Pack result does not include filePath")
+            raise CsmarMcpError(
+                "download_failed",
+                "CSMAR finished packaging but did not provide a file URL.",
+                hint="Retry the download. If the issue persists, narrow the query and try again.",
+            )
 
-        resolved_output_dir = Path(output_dir).expanduser().resolve()
+        resolved_output_dir = Path(request.output_dir).expanduser().resolve()
         resolved_output_dir.mkdir(parents=True, exist_ok=True)
 
-        sanitized_download_id = self._sanitize_path_fragment(plan.download_id)
+        sanitized_download_id = self._sanitize_path_fragment(request.download_id)
         zip_path = (resolved_output_dir / f"{sanitized_download_id}_{sign_code}.zip").resolve()
         extract_dir = (resolved_output_dir / f"{sanitized_download_id}_{sign_code}").resolve()
 
@@ -299,7 +465,9 @@ class CsmarClient:
         if http_response.status >= 400:
             raise CsmarMcpError(
                 "download_failed",
-                f"Failed to download packaged file from CSMAR: HTTP {http_response.status}",
+                "CSMAR returned a download URL but the archive could not be fetched.",
+                hint="Retry the download. If it fails again, try a narrower query.",
+                raw_message=f"HTTP {http_response.status}",
             )
 
         zip_path.write_bytes(http_response.data)
@@ -310,19 +478,18 @@ class CsmarClient:
         except Exception as error:
             raise CsmarMcpError(
                 "unzip_failed",
-                f"Failed to extract archive {zip_path}: {error}",
+                "The downloaded archive could not be extracted.",
+                hint="Retry the download. If it fails again, delete the output directory and try again.",
+                raw_message=str(error),
             ) from error
 
         extracted_files = sorted(str(path.resolve()) for path in extract_dir.rglob("*") if path.is_file())
-
-        return DownloadArtifact(
-            download_id=plan.download_id,
-            table_name=plan.table_name,
-            status="success",
+        return DownloadManifest(
+            download_id=request.download_id,
+            table_code=request.table_code,
             zip_path=str(zip_path),
             extract_dir=str(extract_dir),
             files=extracted_files,
-            retry_count=0,
         )
 
     def _poll_pack_result(self, sign_code: str) -> dict[str, Any]:
@@ -339,19 +506,41 @@ class CsmarClient:
             if status == "0":
                 raise CsmarMcpError(
                     "download_failed",
-                    "CSMAR reported packaging failure. Check columns, condition, and purchase permissions.",
+                    "CSMAR failed to build the download package.",
+                    hint="Check the columns and condition, then retry. Validate the same request before downloading if needed.",
                 )
             if time.monotonic() >= deadline:
                 raise CsmarMcpError(
                     "download_failed",
-                    f"Timed out waiting for packaged file after {self._poll_timeout_seconds} seconds.",
+                    "Timed out while waiting for the packaged archive.",
+                    hint="Retry the download or narrow the query to reduce package size.",
                 )
 
             time.sleep(self._poll_interval_seconds)
 
+    def _alias_manifest(self, manifest: DownloadManifest, download_id: str) -> DownloadManifest:
+        if manifest.download_id == download_id:
+            with self._lock:
+                self._download_manifests[download_id] = manifest.model_copy(deep=True)
+            return manifest.model_copy(deep=True)
+
+        aliased_manifest = manifest.model_copy(update={"download_id": download_id}, deep=True)
+        with self._lock:
+            self._download_manifests[download_id] = aliased_manifest.model_copy(deep=True)
+        return aliased_manifest
+
+    def _manifest_to_output(self, manifest: DownloadManifest) -> DownloadMaterializeOutput:
+        return DownloadMaterializeOutput(
+            download_id=manifest.download_id,
+            table_code=manifest.table_code,
+            zip_path=manifest.zip_path,
+            extract_dir=manifest.extract_dir,
+            file_count=len(manifest.files),
+        )
+
     def _build_query_payload(
         self,
-        table_name: str,
+        table_code: str,
         columns: list[str],
         condition: str | None,
         start_date: str | None,
@@ -360,7 +549,7 @@ class CsmarClient:
         payload: dict[str, Any] = {
             "columns": columns,
             "condition": self._normalize_condition(condition),
-            "table": table_name,
+            "table": table_code,
         }
         if start_date:
             payload["startTime"] = start_date
@@ -374,29 +563,26 @@ class CsmarClient:
             return normalized
         return f"{normalized} limit 0,{limit}"
 
-    def _build_cache_key(
-        self,
-        table_name: str,
-        columns: list[str],
-        condition: str | None,
-        start_date: str | None,
-        end_date: str | None,
-    ) -> str:
-        normalized_condition = self._normalize_condition(condition)
-        normalized_columns = ",".join(columns)
-        return "|".join(
-            [
-                table_name.strip(),
-                normalized_columns,
-                normalized_condition,
-                (start_date or "").strip(),
-                (end_date or "").strip(),
-            ]
-        )
-
     def _normalize_condition(self, condition: str | None) -> str:
         normalized = (condition or "").strip()
         return normalized if normalized else "1=1"
+
+    def _score_catalog_match(self, record: CatalogRecord, query: str) -> tuple[float, str] | None:
+        code = record.table_code.lower()
+        name = record.table_name.lower()
+        database = record.database_name.lower()
+
+        if query == code:
+            return 100.0, "exact table code match"
+        if query == name:
+            return 95.0, "exact table name match"
+        if query in code:
+            return 90.0, "table code contains the search text"
+        if query in name:
+            return 85.0, "table name contains the search text"
+        if query in database:
+            return 70.0, "database name contains the search text"
+        return None
 
     def _get(self, endpoint: str, include_belong: bool = False) -> dict[str, Any]:
         def requester() -> dict[str, Any]:
@@ -441,7 +627,11 @@ class CsmarClient:
 
         token = str(response.get("data", {}).get("token", "")).strip()
         if not token:
-            raise CsmarMcpError("auth_failed", "Login succeeded but no token was returned by CSMAR")
+            raise CsmarMcpError(
+                "auth_failed",
+                "Authentication failed because CSMAR did not return a token.",
+                hint="Check the account and password, then restart the MCP server.",
+            )
 
         self._service.writeToken(token, self._lang, self._belong)
         self._logged_in = True
@@ -467,7 +657,11 @@ class CsmarClient:
             token_lines = self._get_token_lines()
 
         if token_lines is None:
-            raise CsmarMcpError("auth_failed", "Unable to read token after login")
+            raise CsmarMcpError(
+                "auth_failed",
+                "Authentication failed because the token file could not be read.",
+                hint="Check the account and password, then restart the MCP server.",
+            )
 
         headers: dict[str, str] = {
             "Lang": token_lines[1].strip(),
@@ -491,8 +685,8 @@ class CsmarClient:
 
     def _to_error(self, response: dict[str, Any], fallback_error_code: str = "upstream_error") -> CsmarMcpError:
         upstream_code = response.get("code")
-        message = str(response.get("msg") or "Unknown upstream error from CSMAR")
-        lowered_message = message.lower()
+        raw_message = str(response.get("msg") or "Unknown upstream error from CSMAR")
+        lowered_message = raw_message.lower()
 
         if upstream_code == -3004 or "offline" in lowered_message or "login" in lowered_message:
             error_code = "auth_failed"
@@ -509,7 +703,41 @@ class CsmarClient:
         else:
             error_code = fallback_error_code
 
-        return CsmarMcpError(error_code=error_code, message=message, upstream_code=upstream_code)
+        return CsmarMcpError(
+            error_code=error_code,
+            message=self._summarize_error(error_code),
+            hint=self._default_hint(error_code),
+            upstream_code=upstream_code,
+            raw_message=raw_message,
+        )
+
+    def _summarize_error(self, error_code: str) -> str:
+        messages = {
+            "auth_failed": "Authentication with CSMAR failed.",
+            "not_purchased": "The requested database or table is not available to this account.",
+            "table_not_found": "The table_code was not found.",
+            "field_not_found": "One or more requested columns do not exist in the table.",
+            "invalid_condition": "The condition could not be parsed by CSMAR.",
+            "rate_limited": "CSMAR is cooling down the same query.",
+            "download_failed": "CSMAR could not build or fetch the requested archive.",
+            "unzip_failed": "The downloaded archive could not be extracted.",
+            "upstream_error": "CSMAR returned an unexpected error.",
+        }
+        return messages.get(error_code, "CSMAR returned an unexpected error.")
+
+    def _default_hint(self, error_code: str) -> str:
+        hints = {
+            "auth_failed": "Check the account and password, then restart the MCP server.",
+            "not_purchased": "Choose a table from a purchased database before retrying.",
+            "table_not_found": "Use csmar_catalog_search to find a valid table_code, then retry.",
+            "field_not_found": "Use csmar_get_table_schema to inspect the field list, then retry.",
+            "invalid_condition": "Fix the condition syntax and retry. Example: use '=' instead of '=='.",
+            "rate_limited": "Retry after the cooldown expires or change the condition or date range.",
+            "download_failed": "Validate the query first, then retry the download.",
+            "unzip_failed": "Retry the download. If it fails again, clear the output directory and retry.",
+            "upstream_error": "Retry the same request. If it fails again, narrow the query and inspect the schema first.",
+        }
+        return hints.get(error_code, "Review the arguments and retry.")
 
     def _is_rate_limited_message(self, lowered_message: str) -> bool:
         rate_limit_tokens = (
@@ -563,6 +791,57 @@ class CsmarClient:
 
         return normalized_values
 
+    def _normalize_table_list(self, database_name: str, values: Any) -> list[CatalogRecord]:
+        if not isinstance(values, list):
+            return []
+
+        table_records: list[CatalogRecord] = []
+        seen_codes: set[str] = set()
+
+        for item in values:
+            if isinstance(item, str) or not isinstance(item, dict):
+                continue
+
+            table_code: str | None = None
+            table_name: str | None = None
+
+            for code_key in ("tableCode", "code", "table", "tableNameEn", "engName"):
+                raw_value = item.get(code_key)
+                if raw_value is not None and str(raw_value).strip():
+                    table_code = str(raw_value).strip()
+                    break
+
+            for name_key in ("tableName", "name", "tableNameCn", "cnName"):
+                raw_value = item.get(name_key)
+                if raw_value is not None and str(raw_value).strip():
+                    table_name = str(raw_value).strip()
+                    break
+
+            if table_code is None:
+                for key, raw_value in item.items():
+                    if raw_value is None:
+                        continue
+                    text = str(raw_value).strip()
+                    if not text:
+                        continue
+                    lowered_key = key.lower()
+                    if "code" in lowered_key or "en" in lowered_key:
+                        table_code = text
+                    elif "name" in lowered_key or "cn" in lowered_key:
+                        table_name = text
+
+            if table_code and table_code not in seen_codes:
+                seen_codes.add(table_code)
+                table_records.append(
+                    CatalogRecord(
+                        database_name=database_name,
+                        table_code=table_code,
+                        table_name=table_name or table_code,
+                    )
+                )
+
+        return table_records
+
     def _deduplicate(self, values: list[str]) -> list[str]:
         unique_values: list[str] = []
         seen: set[str] = set()
@@ -575,30 +854,23 @@ class CsmarClient:
 
     def _get_cache_value(self, cache: dict[str, CacheEntry], key: str) -> Any | None:
         entry = cache.get(key)
-        if not entry:
+        if entry is None:
             return None
-
         if self._now() - entry.created_at > self._cache_ttl:
             cache.pop(key, None)
             return None
-
         return entry.value
 
-    def _artifact_exists(self, artifact: DownloadArtifact) -> bool:
-        if not artifact.zip_path or not artifact.extract_dir:
-            return False
-
-        zip_path = Path(artifact.zip_path)
-        extract_dir = Path(artifact.extract_dir)
-
+    def _manifest_exists(self, manifest: DownloadManifest) -> bool:
+        zip_path = Path(manifest.zip_path)
+        extract_dir = Path(manifest.extract_dir)
         if not zip_path.exists() or not extract_dir.exists():
             return False
-
-        return all(Path(file_path).exists() for file_path in artifact.files)
+        return all(Path(file_path).exists() for file_path in manifest.files)
 
     def _sanitize_path_fragment(self, value: str) -> str:
         sanitized = re.sub(r"[^A-Za-z0-9_.-]+", "_", value.strip())
-        return sanitized or "plan"
+        return sanitized or "download"
 
     def _now(self) -> datetime:
         return datetime.now(timezone.utc)
