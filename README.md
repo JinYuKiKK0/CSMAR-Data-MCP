@@ -1,43 +1,45 @@
 # CSMAR MCP
 
-Lean MCP server for CSMAR metadata discovery, query validation, and local download materialization.
+Lean MCP server for CSMAR metadata discovery, probe validation, and local materialization for agent workflows.
 
 ## Public Surface
 
 ### Tools
 
-- `csmar_list_databases`
-  Use this first when the user wants to explore which purchased databases are available.
-- `csmar_list_tables`
-  Use this after choosing a database to inspect all tables in that database. Copy `database_name` verbatim from `csmar_list_databases`.
-- `csmar_catalog_search`
-  Use this for targeted lookup when you already have a topic, likely table code, or likely table name.
-- `csmar_get_table_schema`
-  Use this to inspect fields and request a tiny preview after you know the table code.
-- `csmar_query_validate`
-  Use this before downloading to confirm row count, sample rows, and download feasibility.
-- `csmar_download_materialize`
-  Use this only after validation succeeds to write files to a local directory.
+1. `csmar_list_databases`
+   Deterministically enumerate purchased databases.
 
-### Resources
+2. `csmar_list_tables`
+   Deterministically enumerate tables under a purchased database.
 
-- `csmar://table/{table_code}/schema`
-  Returns the full schema for a known table.
-- `csmar://artifacts/{download_id}/manifest`
-  Returns the full extracted file list for a completed download.
+3. `csmar_search_tables`
+   Discover candidate tables by business topic, table name, or table code.
 
-### Prompt
+4. `csmar_search_fields`
+   Discover candidate fields semantically, optionally scoped by database and table.
 
-- `repair_csmar_request`
-  Use this after a tool error to generate a concise retry plan.
+5. `csmar_get_table_schema`
+   Return pure table schema with field metadata. No preview rows.
+
+6. `csmar_probe_query`
+   Probe a query and return `validation_id`, `query_fingerprint`, row count, tiny sample, invalid columns, and materialization feasibility.
+
+7. `csmar_materialize_query`
+   Materialize a previously probed query by `validation_id` into local files.
+
+### Non-Goals for Public Surface
+
+- No public resources.
+- No public prompts.
+- No transport-layer tools like start/poll/unzip exposed to callers.
 
 ## Design Principles
 
-- Lean JSON: tool results only contain the minimum fields needed for the next decision.
-- Agent-friendly errors: failures return `code`, `message`, `hint`, and only add `retry_after_seconds`, `candidate_values`, or `suggested_args_patch` when needed.
-- Database names are strict: call `csmar_list_databases` first and copy `database_name` values verbatim instead of guessing or paraphrasing them.
-- No hard-coded time window: `start_date` and `end_date` are validated for format and ordering only, then passed through to the SDK.
-- No legacy compatibility layer: the server exposes one contract per tool and does not support `params`, batch wrappers, or alias fields.
+- Single responsibility per tool.
+- Lean JSON outputs: return only fields needed for next step.
+- Repair-oriented errors: `code`, `message`, `hint`, plus optional `retry_after_seconds`, `candidate_values`, `suggested_args_patch`.
+- Date ranges are validated for format and ordering only, then passed through to SDK.
+- Query probe and materialization are linked by `validation_id`.
 
 ## Tool Examples
 
@@ -55,7 +57,7 @@ Lean MCP server for CSMAR metadata discovery, query validation, and local downlo
 }
 ```
 
-### `csmar_catalog_search`
+### `csmar_search_tables`
 
 ```json
 {
@@ -64,18 +66,27 @@ Lean MCP server for CSMAR metadata discovery, query validation, and local downlo
 }
 ```
 
+### `csmar_search_fields`
+
+```json
+{
+  "query": "net profit",
+  "database_name": "财务报表",
+  "role_hint": "outcome",
+  "frequency_hint": "annual",
+  "limit": 10
+}
+```
+
 ### `csmar_get_table_schema`
 
 ```json
 {
-  "table_code": "FS_Combas",
-  "field_query": "Acc",
-  "preview_columns": ["Stkcd", "Accper", "Typrep"],
-  "preview_rows": 2
+  "table_code": "FS_Combas"
 }
 ```
 
-### `csmar_query_validate`
+### `csmar_probe_query`
 
 ```json
 {
@@ -88,15 +99,11 @@ Lean MCP server for CSMAR metadata discovery, query validation, and local downlo
 }
 ```
 
-### `csmar_download_materialize`
+### `csmar_materialize_query`
 
 ```json
 {
-  "table_code": "FS_Combas",
-  "columns": ["Stkcd", "Accper", "Typrep"],
-  "condition": "Stkcd='000001'",
-  "start_date": "2010-01-01",
-  "end_date": "2024-12-31",
+  "validation_id": "validation_1234567890",
   "output_dir": "D:/tmp/csmar"
 }
 ```
@@ -146,6 +153,6 @@ uv run csmar-mcp --account YOUR_ACCOUNT --password YOUR_PASSWORD
 ## Notes
 
 - The server logs in automatically and retries once when authentication expires.
-- Validation and download requests reuse local cache when possible to reduce repeated upstream calls.
-- Invalid `database_name` guesses return `database_not_found` with repair guidance instead of a generic upstream failure.
-- Tool responses never inline full datasets or full file manifests.
+- Probe and materialization flows reuse cache when possible to mitigate upstream rate limits.
+- Invalid `database_name` or `table_code` returns repair-oriented errors with actionable suggestions.
+- Tool responses avoid returning complete datasets.

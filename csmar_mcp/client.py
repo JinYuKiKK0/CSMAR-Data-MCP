@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import threading
@@ -11,19 +12,21 @@ from difflib import SequenceMatcher, get_close_matches
 from pathlib import Path
 from typing import Any, Callable
 from urllib import parse
+from uuid import uuid4
 
 import urllib3
 
 from csmarapi.CsmarService import CsmarService
 
 from .models import (
-    CatalogItem,
-    DownloadManifest,
-    DownloadMaterializeInput,
-    DownloadMaterializeOutput,
-    QueryValidateInput,
-    QueryValidateOutput,
-    TableSchemaOutput,
+    FieldSchemaItem,
+    GetTableSchemaOutput,
+    MaterializeAudit,
+    MaterializeQueryOutput,
+    ProbeQueryInput,
+    ProbeQueryOutput,
+    SearchFieldItem,
+    SearchTableItem,
     ToolError,
 )
 
@@ -75,6 +78,19 @@ class CatalogRecord:
     table_name: str
 
 
+@dataclass(frozen=True, slots=True)
+class ValidationRecord:
+    validation_id: str
+    query_fingerprint: str
+    table_code: str
+    columns: tuple[str, ...]
+    condition: str | None
+    start_date: str | None
+    end_date: str | None
+    row_count: int
+    can_materialize: bool
+
+
 class CsmarClient:
     def __init__(
         self,
@@ -94,11 +110,13 @@ class CsmarClient:
         self._service = CsmarService()
         self._http = urllib3.PoolManager()
         self._lock = threading.RLock()
+
         self._catalog_cache: dict[str, CacheEntry] = {}
-        self._validation_cache: dict[str, CacheEntry] = {}
+        self._schema_cache: dict[str, CacheEntry] = {}
+        self._probe_cache: dict[str, CacheEntry] = {}
+        self._validation_registry: dict[str, CacheEntry] = {}
         self._download_cache: dict[str, CacheEntry] = {}
         self._rate_limit_cooldowns: dict[str, datetime] = {}
-        self._download_manifests: dict[str, DownloadManifest] = {}
 
         self._cache_ttl = timedelta(minutes=max(1, cache_ttl_minutes))
         self._poll_interval_seconds = max(1, poll_interval_seconds)
@@ -129,72 +147,96 @@ class CsmarClient:
 
         return table_records
 
-    def search_catalog(self, query: str, database_name: str | None = None, limit: int = 10) -> list[CatalogItem]:
+    def search_tables(self, query: str, database_name: str | None = None, limit: int = 10) -> list[SearchTableItem]:
         normalized_query = query.strip().lower()
         databases = [database_name] if database_name else self.list_databases()
-        matches: list[tuple[float, CatalogItem]] = []
+        matches: list[SearchTableItem] = []
 
         for db_name in databases:
             for record in self.list_tables(db_name):
-                scored = self._score_catalog_match(record, normalized_query)
+                scored = self._score_table_match(record, normalized_query)
                 if scored is None:
                     continue
                 score, why_matched = scored
                 matches.append(
-                    (
-                        score,
-                        CatalogItem(
-                            table_code=record.table_code,
-                            table_name=record.table_name,
-                            database_name=record.database_name,
-                            why_matched=why_matched,
-                        ),
+                    SearchTableItem(
+                        table_code=record.table_code,
+                        table_name=record.table_name,
+                        database_name=record.database_name,
+                        why_matched=why_matched,
+                        score=score,
                     )
                 )
 
-        if not matches:
-            fallback_matches: list[tuple[float, CatalogItem]] = []
-            for db_name in databases:
-                for record in self.list_tables(db_name):
-                    ratio = max(
-                        SequenceMatcher(None, normalized_query, record.table_code.lower()).ratio(),
-                        SequenceMatcher(None, normalized_query, record.table_name.lower()).ratio(),
-                    )
-                    if ratio < 0.35:
-                        continue
-                    fallback_matches.append(
-                        (
-                            ratio,
-                            CatalogItem(
-                                table_code=record.table_code,
-                                table_name=record.table_name,
-                                database_name=record.database_name,
-                                why_matched="similar to the search text",
-                            ),
-                        )
-                    )
-            matches = fallback_matches
+        matches.sort(key=lambda item: (-item.score, item.table_code))
+        return matches[:limit]
 
-        matches.sort(key=lambda item: (-item[0], item[1].table_code))
-        return [item for _, item in matches[:limit]]
+    def list_field_schema_items(self, table_code: str) -> list[FieldSchemaItem]:
+        cache_key = f"schema::{table_code.strip()}"
+        with self._lock:
+            cached = self._get_cache_value(self._schema_cache, cache_key)
+            if cached is not None:
+                return [item.model_copy(deep=True) for item in cached]
 
-    def list_fields(self, table_code: str) -> list[str]:
         encoded_table_name = parse.quote(table_code)
         endpoint = f"{self._service.urlUtil.getListFieldsUrl()}?table={encoded_table_name}"
         response = self._get(endpoint, include_belong=True)
-        return self._deduplicate(
-            self._normalize_name_list(
-                response.get("data"),
-                dict_name_keys=("field", "fieldName", "name", "columnName", "column", "value"),
-            )
-        )
+        fields = self._normalize_field_schema_list(response.get("data"))
 
-    def read_table_schema(self, table_code: str) -> TableSchemaOutput:
-        fields = self.list_fields(table_code)
-        return TableSchemaOutput(table_code=table_code, field_count=len(fields), fields=fields)
+        with self._lock:
+            self._schema_cache[cache_key] = CacheEntry(
+                created_at=self._now(),
+                value=[item.model_copy(deep=True) for item in fields],
+            )
+
+        return fields
+
+    def read_table_schema(self, table_code: str) -> GetTableSchemaOutput:
+        fields = self.list_field_schema_items(table_code)
+        return GetTableSchemaOutput(table_code=table_code, fields=fields)
+
+    def search_fields(
+        self,
+        query: str,
+        database_name: str | None = None,
+        table_code: str | None = None,
+        role_hint: str | None = None,
+        frequency_hint: str | None = None,
+        limit: int = 20,
+    ) -> list[SearchFieldItem]:
+        table_candidates = self._resolve_table_candidates(database_name=database_name, table_code=table_code)
+        normalized_query = query.strip().lower()
+
+        matches: list[SearchFieldItem] = []
+        for table in table_candidates:
+            schema_fields = self.list_field_schema_items(table.table_code)
+            for field in schema_fields:
+                scored = self._score_field_match(field, normalized_query, role_hint, frequency_hint)
+                if scored is None:
+                    continue
+
+                score, why_matched = scored
+                matches.append(
+                    SearchFieldItem(
+                        field_name=field.field_name,
+                        field_label=field.field_label,
+                        field_description=field.field_description,
+                        data_type=field.data_type,
+                        frequency_tags=field.frequency_tags,
+                        role_tags=field.role_tags,
+                        table_code=table.table_code,
+                        table_name=table.table_name,
+                        database_name=table.database_name,
+                        why_matched=why_matched,
+                        score=score,
+                    )
+                )
+
+        matches.sort(key=lambda item: (-item.score, item.table_code, item.field_name))
+        return matches[:limit]
 
     def suggest_tables(self, table_code: str, database_name: str | None = None, limit: int = 5) -> list[str]:
-        records = self.search_catalog(table_code, database_name=database_name, limit=max(limit, 10))
+        records = self.search_tables(table_code, database_name=database_name, limit=max(limit, 10))
         suggestions = [f"{item.table_code} ({item.table_name})" for item in records]
         if suggestions:
             return suggestions[:limit]
@@ -231,20 +273,13 @@ class CsmarClient:
         return get_close_matches(database_name, self.list_databases(), n=limit, cutoff=0.45)
 
     def suggest_fields(self, table_code: str, columns: list[str], limit: int = 5) -> list[str]:
-        field_pool = self.list_fields(table_code)
+        field_pool = [item.field_name for item in self.list_field_schema_items(table_code)]
         suggestions: list[str] = []
         for column in columns:
             for candidate in get_close_matches(column, field_pool, n=limit, cutoff=0.5):
                 if candidate not in suggestions:
                     suggestions.append(candidate)
         return suggestions[:limit]
-
-    def preview(self, table_code: str) -> list[dict[str, Any]]:
-        payload = {"table": table_code}
-        response = self._post(self._service.urlUtil.getPreviewUrl(), payload)
-        data = response.get("data", {})
-        preview_rows = data.get("previewDatas", []) if isinstance(data, dict) else []
-        return [row for row in preview_rows if isinstance(row, dict)]
 
     def build_cache_key(
         self,
@@ -267,40 +302,43 @@ class CsmarClient:
             ]
         )
 
-    def get_cached_validation(self, cache_key: str) -> QueryValidateOutput | None:
-        with self._lock:
-            cached = self._get_cache_value(self._validation_cache, cache_key)
-            return cached.model_copy(deep=True) if cached is not None else None
+    def build_query_fingerprint(
+        self,
+        *,
+        table_code: str,
+        columns: list[str],
+        condition: str | None,
+        start_date: str | None,
+        end_date: str | None,
+    ) -> str:
+        cache_key = self.build_cache_key(
+            table_code=table_code,
+            columns=columns,
+            condition=condition,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        return hashlib.sha1(cache_key.encode("utf-8")).hexdigest()[:16]
 
-    def set_cached_validation(self, cache_key: str, result: QueryValidateOutput) -> None:
+    def get_cached_probe(self, cache_key: str) -> ProbeQueryOutput | None:
         with self._lock:
-            self._validation_cache[cache_key] = CacheEntry(created_at=self._now(), value=result.model_copy(deep=True))
-
-    def get_cached_manifest(self, cache_key: str) -> DownloadManifest | None:
-        with self._lock:
-            cached = self._get_cache_value(self._download_cache, cache_key)
+            cached = self._get_cache_value(self._probe_cache, cache_key)
             if cached is None:
                 return None
-            if self._manifest_exists(cached):
-                return cached.model_copy(deep=True)
-            self._download_cache.pop(cache_key, None)
-            return None
+            return cached.model_copy(deep=True)
 
-    def set_cached_manifest(self, cache_key: str, manifest: DownloadManifest) -> None:
+    def get_validation_record(self, validation_id: str) -> ValidationRecord | None:
         with self._lock:
-            manifest_copy = manifest.model_copy(deep=True)
-            self._download_cache[cache_key] = CacheEntry(created_at=self._now(), value=manifest_copy)
-            self._download_manifests[manifest.download_id] = manifest_copy
+            record = self._get_cache_value(self._validation_registry, validation_id)
+            if record is None:
+                return None
+            return record
 
-    def get_download_manifest(self, download_id: str) -> DownloadManifest | None:
+    def set_cached_probe(self, cache_key: str, result: ProbeQueryOutput, record: ValidationRecord) -> None:
         with self._lock:
-            manifest = self._download_manifests.get(download_id)
-            if manifest is None:
-                return None
-            if not self._manifest_exists(manifest):
-                self._download_manifests.pop(download_id, None)
-                return None
-            return manifest.model_copy(deep=True)
+            now = self._now()
+            self._probe_cache[cache_key] = CacheEntry(created_at=now, value=result.model_copy(deep=True))
+            self._validation_registry[result.validation_id] = CacheEntry(created_at=now, value=record)
 
     def mark_rate_limited(self, cache_key: str) -> None:
         with self._lock:
@@ -319,7 +357,7 @@ class CsmarClient:
 
             return remaining_seconds
 
-    def validate_query(self, request: QueryValidateInput) -> QueryValidateOutput:
+    def probe_query(self, request: ProbeQueryInput) -> ProbeQueryOutput:
         cache_key = self.build_cache_key(
             table_code=request.table_code,
             columns=request.columns,
@@ -327,19 +365,42 @@ class CsmarClient:
             start_date=request.start_date,
             end_date=request.end_date,
         )
-        cached = self.get_cached_validation(cache_key)
+        cached = self.get_cached_probe(cache_key)
         if cached is not None:
             return cached
 
-        table_fields = set(self.list_fields(request.table_code))
-        missing_columns = [column for column in request.columns if column not in table_fields]
-        if missing_columns:
-            raise CsmarMcpError(
-                "field_not_found",
-                "One or more requested columns do not exist in the table.",
-                hint="Use csmar_get_table_schema to inspect the table fields, then retry with valid columns.",
-                candidate_values=self.suggest_fields(request.table_code, missing_columns),
+        query_fingerprint = self.build_query_fingerprint(
+            table_code=request.table_code,
+            columns=request.columns,
+            condition=request.condition,
+            start_date=request.start_date,
+            end_date=request.end_date,
+        )
+        available_fields = {item.field_name for item in self.list_field_schema_items(request.table_code)}
+        invalid_columns = [column for column in request.columns if column not in available_fields]
+
+        validation_id = self._generate_validation_id()
+        if invalid_columns:
+            result = ProbeQueryOutput(
+                validation_id=validation_id,
+                query_fingerprint=query_fingerprint,
+                row_count=0,
+                invalid_columns=invalid_columns,
+                can_materialize=False,
             )
+            record = ValidationRecord(
+                validation_id=validation_id,
+                query_fingerprint=query_fingerprint,
+                table_code=request.table_code,
+                columns=tuple(request.columns),
+                condition=request.condition,
+                start_date=request.start_date,
+                end_date=request.end_date,
+                row_count=0,
+                can_materialize=False,
+            )
+            self.set_cached_probe(cache_key, result, record)
+            return result
 
         row_count = self.query_count(
             table_code=request.table_code,
@@ -360,14 +421,83 @@ class CsmarClient:
                 end_date=request.end_date,
             )
 
-        result = QueryValidateOutput(
-            table_code=request.table_code,
+        can_materialize = row_count > 0
+        result = ProbeQueryOutput(
+            validation_id=validation_id,
+            query_fingerprint=query_fingerprint,
             row_count=row_count,
             sample_rows=sample_rows or None,
-            can_download=row_count > 0,
+            can_materialize=can_materialize,
         )
-        self.set_cached_validation(cache_key, result)
+
+        record = ValidationRecord(
+            validation_id=validation_id,
+            query_fingerprint=query_fingerprint,
+            table_code=request.table_code,
+            columns=tuple(request.columns),
+            condition=request.condition,
+            start_date=request.start_date,
+            end_date=request.end_date,
+            row_count=row_count,
+            can_materialize=can_materialize,
+        )
+        self.set_cached_probe(cache_key, result, record)
         return result
+
+    def materialize_query(
+        self,
+        validation_id: str,
+        output_dir: str,
+        *,
+        max_retries: int = 2,
+    ) -> MaterializeQueryOutput:
+        record = self.get_validation_record(validation_id)
+        if record is None:
+            raise CsmarMcpError(
+                "invalid_arguments",
+                "validation_id was not found or has expired.",
+                hint="Call csmar_probe_query first, then pass the returned validation_id.",
+            )
+
+        if not record.can_materialize:
+            raise CsmarMcpError(
+                "invalid_arguments",
+                "This validation result cannot be materialized.",
+                hint="Fix invalid columns or broaden filters, then run csmar_probe_query again.",
+            )
+
+        resolved_output_dir = Path(output_dir).expanduser().resolve()
+        materialize_cache_key = f"{record.query_fingerprint}|{resolved_output_dir}"
+        with self._lock:
+            cached = self._get_cache_value(self._download_cache, materialize_cache_key)
+            if cached is not None and self._materialization_exists(cached):
+                return cached.model_copy(deep=True)
+            if cached is not None:
+                self._download_cache.pop(materialize_cache_key, None)
+
+        last_error: CsmarMcpError | None = None
+        for attempt in range(max(0, max_retries) + 1):
+            try:
+                output = self._materialize_query_once(record, resolved_output_dir, retries=attempt)
+                with self._lock:
+                    self._download_cache[materialize_cache_key] = CacheEntry(
+                        created_at=self._now(),
+                        value=output.model_copy(deep=True),
+                    )
+                return output
+            except CsmarMcpError as error:
+                last_error = error
+                if attempt >= max_retries:
+                    break
+                time.sleep(min(2 * (attempt + 1), 8))
+
+        if last_error is None:
+            raise CsmarMcpError(
+                "download_failed",
+                "The download did not complete.",
+                hint="Retry after running csmar_probe_query for the same query.",
+            )
+        raise last_error
 
     def query_count(
         self,
@@ -386,7 +516,7 @@ class CsmarClient:
             raise CsmarMcpError(
                 "upstream_error",
                 "CSMAR returned an unexpected row count.",
-                hint="Retry the same request. If it fails again, narrow the query and inspect the schema first.",
+                hint="Retry the same request. If it fails again, inspect table schema and simplify conditions.",
                 raw_message=repr(count_value),
             ) from error
 
@@ -410,54 +540,19 @@ class CsmarClient:
         normalized_rows = [row for row in rows if isinstance(row, dict)]
         return normalized_rows[:sample_rows]
 
-    def materialize_download(self, request: DownloadMaterializeInput, max_retries: int = 2) -> DownloadMaterializeOutput:
-        cache_key = self.build_cache_key(
-            table_code=request.table_code,
-            columns=request.columns,
-            condition=request.condition,
-            start_date=request.start_date,
-            end_date=request.end_date,
-        )
-        cached_manifest = self.get_cached_manifest(cache_key)
-        if cached_manifest is not None:
-            aliased_manifest = self._alias_manifest(cached_manifest, request.download_id)
-            return self._manifest_to_output(aliased_manifest)
-
-        last_error: CsmarMcpError | None = None
-        for attempt in range(max(0, max_retries) + 1):
-            try:
-                manifest = self._materialize_download_once(request)
-                self.set_cached_manifest(cache_key, manifest)
-                return self._manifest_to_output(manifest)
-            except CsmarMcpError as error:
-                last_error = error
-                if error.error_code == "rate_limited":
-                    cached_manifest = self.get_cached_manifest(cache_key)
-                    if cached_manifest is not None:
-                        aliased_manifest = self._alias_manifest(cached_manifest, request.download_id)
-                        return self._manifest_to_output(aliased_manifest)
-                    raise
-
-                if attempt >= max_retries:
-                    break
-
-                time.sleep(min(2 * (attempt + 1), 8))
-
-        if last_error is None:
-            raise CsmarMcpError(
-                "download_failed",
-                "The download did not complete.",
-                hint="Retry the download after validating the same query with csmar_query_validate.",
-            )
-        raise last_error
-
-    def _materialize_download_once(self, request: DownloadMaterializeInput) -> DownloadManifest:
+    def _materialize_query_once(
+        self,
+        record: ValidationRecord,
+        output_dir: Path,
+        *,
+        retries: int,
+    ) -> MaterializeQueryOutput:
         payload = self._build_query_payload(
-            table_code=request.table_code,
-            columns=request.columns,
-            condition=request.condition,
-            start_date=request.start_date,
-            end_date=request.end_date,
+            table_code=record.table_code,
+            columns=list(record.columns),
+            condition=record.condition,
+            start_date=record.start_date,
+            end_date=record.end_date,
         )
 
         pack_response = self._post(self._service.urlUtil.getPackUrl(), payload)
@@ -466,31 +561,30 @@ class CsmarClient:
             raise CsmarMcpError(
                 "download_failed",
                 "CSMAR did not return a package identifier.",
-                hint="Retry the download. If it fails again, validate the same query before downloading.",
+                hint="Retry materialization. If it fails again, run csmar_probe_query and retry.",
             )
 
-        pack_result = self._poll_pack_result(sign_code)
+        pack_result, packaged_at = self._poll_pack_result(sign_code)
         file_url = str(pack_result.get("filePath", "")).strip()
         if not file_url:
             raise CsmarMcpError(
                 "download_failed",
                 "CSMAR finished packaging but did not provide a file URL.",
-                hint="Retry the download. If the issue persists, narrow the query and try again.",
+                hint="Retry materialization. If the issue persists, narrow the query and probe again.",
             )
 
-        resolved_output_dir = Path(request.output_dir).expanduser().resolve()
-        resolved_output_dir.mkdir(parents=True, exist_ok=True)
+        output_dir.mkdir(parents=True, exist_ok=True)
 
-        sanitized_download_id = self._sanitize_path_fragment(request.download_id)
-        zip_path = (resolved_output_dir / f"{sanitized_download_id}_{sign_code}.zip").resolve()
-        extract_dir = (resolved_output_dir / f"{sanitized_download_id}_{sign_code}").resolve()
+        download_id = self._generate_download_id()
+        zip_path = (output_dir / f"{download_id}_{sign_code}.zip").resolve()
+        extract_dir = (output_dir / f"{download_id}_{sign_code}").resolve()
 
         http_response = self._http.request("GET", file_url)
         if http_response.status >= 400:
             raise CsmarMcpError(
                 "download_failed",
                 "CSMAR returned a download URL but the archive could not be fetched.",
-                hint="Retry the download. If it fails again, try a narrower query.",
+                hint="Retry materialization. If it fails again, narrow the query and retry.",
                 raw_message=f"HTTP {http_response.status}",
             )
 
@@ -503,20 +597,28 @@ class CsmarClient:
             raise CsmarMcpError(
                 "unzip_failed",
                 "The downloaded archive could not be extracted.",
-                hint="Retry the download. If it fails again, delete the output directory and try again.",
+                hint="Retry materialization. If it fails again, clean output_dir and retry.",
                 raw_message=str(error),
             ) from error
 
         extracted_files = sorted(str(path.resolve()) for path in extract_dir.rglob("*") if path.is_file())
-        return DownloadManifest(
-            download_id=request.download_id,
-            table_code=request.table_code,
-            zip_path=str(zip_path),
-            extract_dir=str(extract_dir),
+        completed_at = self._now()
+
+        return MaterializeQueryOutput(
+            download_id=download_id,
+            query_fingerprint=record.query_fingerprint,
+            output_dir=str(output_dir),
             files=extracted_files,
+            row_count=record.row_count,
+            archive_path=str(zip_path),
+            audit=MaterializeAudit(
+                retries=retries,
+                packaged_at=self._to_iso_timestamp(packaged_at),
+                completed_at=self._to_iso_timestamp(completed_at),
+            ),
         )
 
-    def _poll_pack_result(self, sign_code: str) -> dict[str, Any]:
+    def _poll_pack_result(self, sign_code: str) -> tuple[dict[str, Any], datetime]:
         endpoint = f"{self._service.urlUtil.getPackResultUrl()}/{sign_code}"
         deadline = time.monotonic() + self._poll_timeout_seconds
 
@@ -526,41 +628,328 @@ class CsmarClient:
             status = str(data.get("status", ""))
 
             if status == "1":
-                return data
+                return data, self._now()
             if status == "0":
                 raise CsmarMcpError(
                     "download_failed",
                     "CSMAR failed to build the download package.",
-                    hint="Check the columns and condition, then retry. Validate the same request before downloading if needed.",
+                    hint="Check columns and condition, run csmar_probe_query again, then retry materialization.",
                 )
             if time.monotonic() >= deadline:
                 raise CsmarMcpError(
                     "download_failed",
                     "Timed out while waiting for the packaged archive.",
-                    hint="Retry the download or narrow the query to reduce package size.",
+                    hint="Retry materialization or narrow the query.",
                 )
 
             time.sleep(self._poll_interval_seconds)
 
-    def _alias_manifest(self, manifest: DownloadManifest, download_id: str) -> DownloadManifest:
-        if manifest.download_id == download_id:
-            with self._lock:
-                self._download_manifests[download_id] = manifest.model_copy(deep=True)
-            return manifest.model_copy(deep=True)
+    def _materialization_exists(self, output: MaterializeQueryOutput) -> bool:
+        archive_path = Path(output.archive_path)
+        if not archive_path.exists():
+            return False
+        return all(Path(file_path).exists() for file_path in output.files)
 
-        aliased_manifest = manifest.model_copy(update={"download_id": download_id}, deep=True)
-        with self._lock:
-            self._download_manifests[download_id] = aliased_manifest.model_copy(deep=True)
-        return aliased_manifest
+    def _resolve_table_candidates(
+        self,
+        *,
+        database_name: str | None,
+        table_code: str | None,
+    ) -> list[CatalogRecord]:
+        if table_code:
+            if database_name:
+                candidates = [record for record in self.list_tables(database_name) if record.table_code == table_code]
+            else:
+                candidates = self._find_table_records(table_code)
 
-    def _manifest_to_output(self, manifest: DownloadManifest) -> DownloadMaterializeOutput:
-        return DownloadMaterializeOutput(
-            download_id=manifest.download_id,
-            table_code=manifest.table_code,
-            zip_path=manifest.zip_path,
-            extract_dir=manifest.extract_dir,
-            file_count=len(manifest.files),
+            if not candidates:
+                raise CsmarMcpError(
+                    "table_not_found",
+                    "The table_code was not found.",
+                    hint="Use csmar_search_tables to find a valid table_code, then retry.",
+                    candidate_values=self.suggest_tables(table_code, database_name=database_name),
+                )
+            return candidates
+
+        if database_name:
+            return self.list_tables(database_name)
+
+        candidates: list[CatalogRecord] = []
+        for db_name in self.list_databases():
+            candidates.extend(self.list_tables(db_name))
+        return candidates
+
+    def _find_table_records(self, table_code: str) -> list[CatalogRecord]:
+        normalized = table_code.strip().lower()
+        if not normalized:
+            return []
+
+        matches: list[CatalogRecord] = []
+        for db_name in self.list_databases():
+            for record in self.list_tables(db_name):
+                if record.table_code.lower() == normalized:
+                    matches.append(record)
+        return matches
+
+    def _score_table_match(self, record: CatalogRecord, query: str) -> tuple[float, str] | None:
+        code = record.table_code.lower()
+        name = record.table_name.lower()
+        database = record.database_name.lower()
+
+        if query == code:
+            return 100.0, "exact table code match"
+        if query == name:
+            return 98.0, "exact table name match"
+        if query in code:
+            return 94.0, "table code contains query"
+        if query in name:
+            return 90.0, "table name contains query"
+        if query in database:
+            return 75.0, "database name contains query"
+
+        ratio = max(
+            SequenceMatcher(None, query, code).ratio(),
+            SequenceMatcher(None, query, name).ratio(),
+            SequenceMatcher(None, query, database).ratio(),
         )
+        if ratio < 0.35:
+            return None
+        return round(60.0 + ratio * 30.0, 2), "similar to query text"
+
+    def _score_field_match(
+        self,
+        field: FieldSchemaItem,
+        query: str,
+        role_hint: str | None,
+        frequency_hint: str | None,
+    ) -> tuple[float, str] | None:
+        field_name = field.field_name.lower()
+        field_label = (field.field_label or "").lower()
+        field_description = (field.field_description or "").lower()
+        data_type = (field.data_type or "").lower()
+        role_blob = " ".join(field.role_tags or []).lower()
+        frequency_blob = " ".join(field.frequency_tags or []).lower()
+
+        reasons: list[str] = []
+        if query == field_name:
+            score = 100.0
+            reasons.append("exact field name match")
+        elif field_label and query == field_label:
+            score = 98.0
+            reasons.append("exact field label match")
+        elif query in field_name:
+            score = 94.0
+            reasons.append("field name contains query")
+        elif field_label and query in field_label:
+            score = 91.0
+            reasons.append("field label contains query")
+        elif field_description and query in field_description:
+            score = 87.0
+            reasons.append("field description contains query")
+        else:
+            ratio = max(
+                SequenceMatcher(None, query, field_name).ratio(),
+                SequenceMatcher(None, query, field_label).ratio() if field_label else 0.0,
+                SequenceMatcher(None, query, field_description).ratio() if field_description else 0.0,
+                SequenceMatcher(None, query, data_type).ratio() if data_type else 0.0,
+            )
+            if ratio < 0.34:
+                return None
+            score = round(60.0 + ratio * 30.0, 2)
+            reasons.append("similar to query text")
+
+        if role_hint:
+            normalized_role_hint = role_hint.strip().lower()
+            if normalized_role_hint and (
+                normalized_role_hint in role_blob
+                or normalized_role_hint in field_label
+                or normalized_role_hint in field_description
+            ):
+                score += 4.0
+                reasons.append("role hint matched")
+            elif normalized_role_hint:
+                score -= 1.0
+
+        if frequency_hint:
+            normalized_frequency_hint = frequency_hint.strip().lower()
+            if normalized_frequency_hint and (
+                normalized_frequency_hint in frequency_blob
+                or normalized_frequency_hint in field_label
+                or normalized_frequency_hint in field_description
+            ):
+                score += 4.0
+                reasons.append("frequency hint matched")
+            elif normalized_frequency_hint:
+                score -= 1.0
+
+        return round(max(0.0, min(100.0, score)), 2), "; ".join(reasons)
+
+    def _normalize_field_schema_list(self, values: Any) -> list[FieldSchemaItem]:
+        if not isinstance(values, list):
+            return []
+
+        items: list[FieldSchemaItem] = []
+        seen: set[str] = set()
+        for raw_item in values:
+            if isinstance(raw_item, str):
+                field_name = raw_item.strip()
+                if not field_name or field_name in seen:
+                    continue
+                seen.add(field_name)
+                items.append(FieldSchemaItem(field_name=field_name))
+                continue
+
+            if not isinstance(raw_item, dict):
+                continue
+
+            field_name = self._pick_text(
+                raw_item,
+                preferred_keys=("field", "fieldName", "column", "columnName", "name", "value"),
+                token_hints=("field", "column", "name", "code"),
+            )
+            if not field_name or field_name in seen:
+                continue
+
+            seen.add(field_name)
+            field_label = self._pick_text(
+                raw_item,
+                preferred_keys=("fieldLabel", "label", "fieldNameCn", "cnName", "nameCn", "displayName", "title"),
+                token_hints=("label", "title", "cn", "ch", "display"),
+            )
+            if field_label == field_name:
+                field_label = None
+
+            field_description = self._pick_text(
+                raw_item,
+                preferred_keys=("fieldDesc", "description", "remark", "comment", "memo", "help"),
+                token_hints=("desc", "description", "remark", "comment", "memo", "help"),
+            )
+            data_type = self._pick_text(
+                raw_item,
+                preferred_keys=("dataType", "fieldType", "type", "valueType"),
+                token_hints=("type", "dtype"),
+            )
+
+            frequency_tags = self._extract_tags(
+                raw_item,
+                preferred_keys=("frequencyTags", "frequencyTag", "freqTag", "frequency", "freq", "period", "cycle"),
+                token_hints=("frequency", "freq", "period", "cycle"),
+            )
+            role_tags = self._extract_tags(
+                raw_item,
+                preferred_keys=("roleTags", "roleTag", "role", "dimension", "measure", "metric", "identifier"),
+                token_hints=("role", "dimension", "measure", "metric", "identifier"),
+            )
+
+            items.append(
+                FieldSchemaItem(
+                    field_name=field_name,
+                    field_label=field_label,
+                    field_description=field_description,
+                    data_type=data_type,
+                    frequency_tags=frequency_tags,
+                    role_tags=role_tags,
+                )
+            )
+
+        return items
+
+    def _pick_text(
+        self,
+        payload: dict[str, Any],
+        *,
+        preferred_keys: tuple[str, ...],
+        token_hints: tuple[str, ...],
+    ) -> str | None:
+        for key in preferred_keys:
+            value = payload.get(key)
+            text = self._to_text(value)
+            if text:
+                return text
+
+        lowered_map = {key.lower(): value for key, value in payload.items()}
+        for key in preferred_keys:
+            value = lowered_map.get(key.lower())
+            text = self._to_text(value)
+            if text:
+                return text
+
+        for key, value in payload.items():
+            lowered_key = key.lower()
+            if not any(token in lowered_key for token in token_hints):
+                continue
+            text = self._to_text(value)
+            if text:
+                return text
+        return None
+
+    def _extract_tags(
+        self,
+        payload: dict[str, Any],
+        *,
+        preferred_keys: tuple[str, ...],
+        token_hints: tuple[str, ...],
+    ) -> list[str] | None:
+        for key in preferred_keys:
+            if key in payload:
+                tags = self._to_tag_list(payload.get(key))
+                if tags:
+                    return tags
+
+        lowered_map = {key.lower(): value for key, value in payload.items()}
+        for key in preferred_keys:
+            if key.lower() in lowered_map:
+                tags = self._to_tag_list(lowered_map[key.lower()])
+                if tags:
+                    return tags
+
+        for key, value in payload.items():
+            lowered_key = key.lower()
+            if not any(token in lowered_key for token in token_hints):
+                continue
+            tags = self._to_tag_list(value)
+            if tags:
+                return tags
+
+        return None
+
+    def _to_text(self, value: Any) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, (str, int, float)):
+            text = str(value).strip()
+            return text or None
+        return None
+
+    def _to_tag_list(self, value: Any) -> list[str] | None:
+        raw_values: list[str] = []
+        if value is None:
+            return None
+
+        if isinstance(value, str):
+            raw_values = [item.strip() for item in re.split(r"[,;|/，；、]", value) if item.strip()]
+        elif isinstance(value, (list, tuple, set)):
+            for item in value:
+                text = self._to_text(item)
+                if text:
+                    raw_values.append(text)
+        else:
+            text = self._to_text(value)
+            if text:
+                raw_values = [text]
+
+        if not raw_values:
+            return None
+
+        deduplicated: list[str] = []
+        seen: set[str] = set()
+        for item in raw_values:
+            if item in seen:
+                continue
+            seen.add(item)
+            deduplicated.append(item)
+
+        return deduplicated or None
 
     def _build_query_payload(
         self,
@@ -591,22 +980,14 @@ class CsmarClient:
         normalized = (condition or "").strip()
         return normalized if normalized else "1=1"
 
-    def _score_catalog_match(self, record: CatalogRecord, query: str) -> tuple[float, str] | None:
-        code = record.table_code.lower()
-        name = record.table_name.lower()
-        database = record.database_name.lower()
+    def _generate_validation_id(self) -> str:
+        return f"validation_{uuid4().hex[:10]}"
 
-        if query == code:
-            return 100.0, "exact table code match"
-        if query == name:
-            return 95.0, "exact table name match"
-        if query in code:
-            return 90.0, "table code contains the search text"
-        if query in name:
-            return 85.0, "table name contains the search text"
-        if query in database:
-            return 70.0, "database name contains the search text"
-        return None
+    def _generate_download_id(self) -> str:
+        return f"download_{uuid4().hex[:10]}"
+
+    def _to_iso_timestamp(self, value: datetime) -> str:
+        return value.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
     def _get(self, endpoint: str, include_belong: bool = False) -> dict[str, Any]:
         def requester() -> dict[str, Any]:
@@ -643,7 +1024,7 @@ class CsmarClient:
             raise CsmarMcpError(
                 "upstream_error",
                 "CSMAR did not return a valid response.",
-                hint="Retry the same request. If it fails again, narrow the request and inspect the server logs.",
+                hint="Retry the same request. If it fails again, narrow the request and inspect server logs.",
                 raw_message=str(error),
             ) from error
 
@@ -664,7 +1045,7 @@ class CsmarClient:
             raise CsmarMcpError(
                 "auth_failed",
                 "Authentication failed because CSMAR did not return a token.",
-                hint="Check the account and password, then restart the MCP server.",
+                hint="Check account and password, then restart the MCP server.",
             )
 
         self._service.writeToken(token, self._lang, self._belong)
@@ -694,7 +1075,7 @@ class CsmarClient:
             raise CsmarMcpError(
                 "auth_failed",
                 "Authentication failed because the token file could not be read.",
-                hint="Check the account and password, then restart the MCP server.",
+                hint="Check account and password, then restart the MCP server.",
             )
 
         headers: dict[str, str] = {
@@ -762,21 +1143,23 @@ class CsmarClient:
             "download_failed": "CSMAR could not build or fetch the requested archive.",
             "unzip_failed": "The downloaded archive could not be extracted.",
             "upstream_error": "CSMAR returned an unexpected error.",
+            "invalid_arguments": "The tool arguments are invalid.",
         }
         return messages.get(error_code, "CSMAR returned an unexpected error.")
 
     def _default_hint(self, error_code: str) -> str:
         hints = {
-            "auth_failed": "Check the account and password, then restart the MCP server.",
-            "database_not_found": "Call csmar_list_databases, copy a returned database_name verbatim, then retry.",
+            "auth_failed": "Check account and password, then restart the MCP server.",
+            "database_not_found": "Call csmar_list_databases and copy database_name verbatim, then retry.",
             "not_purchased": "Choose a table from a purchased database before retrying.",
-            "table_not_found": "Use csmar_catalog_search to find a valid table_code, then retry.",
-            "field_not_found": "Use csmar_get_table_schema to inspect the field list, then retry.",
-            "invalid_condition": "Fix the condition syntax and retry. Example: use '=' instead of '=='.",
-            "rate_limited": "Retry after the cooldown expires or change the condition or date range.",
-            "download_failed": "Validate the query first, then retry the download.",
-            "unzip_failed": "Retry the download. If it fails again, clear the output directory and retry.",
-            "upstream_error": "Retry the same request. If it fails again, narrow the query and inspect the schema first.",
+            "table_not_found": "Use csmar_search_tables to find a valid table_code, then retry.",
+            "field_not_found": "Use csmar_get_table_schema to inspect fields, then retry.",
+            "invalid_condition": "Fix condition syntax and retry. Example: use '=' instead of '=='.",
+            "rate_limited": "Retry after cooldown expires or change condition/date range.",
+            "download_failed": "Run csmar_probe_query first, then retry csmar_materialize_query.",
+            "unzip_failed": "Retry materialization. If it fails again, clear output_dir and retry.",
+            "upstream_error": "Retry the same request. If it fails again, narrow the query.",
+            "invalid_arguments": "Fix invalid fields and retry with the same tool.",
         }
         return hints.get(error_code, "Review the arguments and retry.")
 
@@ -901,17 +1284,6 @@ class CsmarClient:
             cache.pop(key, None)
             return None
         return entry.value
-
-    def _manifest_exists(self, manifest: DownloadManifest) -> bool:
-        zip_path = Path(manifest.zip_path)
-        extract_dir = Path(manifest.extract_dir)
-        if not zip_path.exists() or not extract_dir.exists():
-            return False
-        return all(Path(file_path).exists() for file_path in manifest.files)
-
-    def _sanitize_path_fragment(self, value: str) -> str:
-        sanitized = re.sub(r"[^A-Za-z0-9_.-]+", "_", value.strip())
-        return sanitized or "download"
 
     def _now(self) -> datetime:
         return datetime.now(timezone.utc)

@@ -1,26 +1,26 @@
 from __future__ import annotations
 
 import argparse
-import json
 from dataclasses import dataclass
 from functools import lru_cache, wraps
 from typing import Any, Callable, Sequence
 
 from mcp.server.fastmcp import FastMCP
-from mcp.types import CallToolResult, PromptMessage, TextContent, ToolAnnotations
+from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from pydantic import ValidationError
 
 from .client import CsmarClient, CsmarMcpError
 from .models import (
-    CatalogSearchInput,
-    CatalogSearchOutput,
-    DownloadMaterializeInput,
     GetTableSchemaInput,
     ListDatabasesOutput,
     ListTablesInput,
     ListTablesOutput,
-    QueryValidateInput,
-    TableSchemaOutput,
+    MaterializeQueryInput,
+    ProbeQueryInput,
+    SearchFieldsInput,
+    SearchFieldsOutput,
+    SearchTablesInput,
+    SearchTablesOutput,
     TableListItem,
     ToolError,
 )
@@ -46,8 +46,8 @@ def _build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="csmar-mcp",
         description=(
-            "Run the Lean V2 CSMAR MCP server over stdio. Only account and password are "
-            "accepted as runtime args; other settings are fixed in code."
+            "Run the CSMAR MCP server over stdio. Only account and password are accepted as runtime args; "
+            "other settings are fixed in code."
         ),
     )
     parser.add_argument("--account", required=True, help="CSMAR account")
@@ -70,8 +70,8 @@ def _configure_runtime(settings: RuntimeSettings) -> None:
 def get_settings() -> RuntimeSettings:
     if _runtime_settings is None:
         raise RuntimeError(
-            "Runtime configuration is missing. Start the server with required CLI args, "
-            "for example: --account ... --password ..."
+            "Runtime configuration is missing. Start the server with required CLI args, for example: "
+            "--account ... --password ..."
         )
     return _runtime_settings
 
@@ -92,10 +92,6 @@ def get_client() -> CsmarClient:
 
 def _text(text: str) -> TextContent:
     return TextContent(type="text", text=text)
-
-
-def _json_text(payload: dict[str, Any]) -> str:
-    return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
 def _success(payload: dict[str, Any], summary: str) -> CallToolResult:
@@ -169,11 +165,11 @@ def _safe_suggestions(fetcher: Callable[[], list[str]]) -> list[str] | None:
     return suggestions or None
 
 
-def _internal_tool_error(tool_name: str, error: Exception) -> ToolError:
+def _internal_tool_error(tool_name: str) -> ToolError:
     return ToolError(
-        code="internal_error",
+        code="upstream_error",
         message=f"The MCP server hit an internal error while running {tool_name}.",
-        hint="Retry the same tool once. If it fails again, simplify the request or inspect the MCP server logs.",
+        hint="Retry the same tool once. If it fails again, simplify the request or inspect MCP server logs.",
     )
 
 
@@ -183,8 +179,8 @@ def _tool_error_boundary(tool_name: str) -> Callable[[Callable[..., CallToolResu
         def wrapped(*args: Any, **kwargs: Any) -> CallToolResult:
             try:
                 return func(*args, **kwargs)
-            except Exception as error:
-                return _failure(_internal_tool_error(tool_name, error))
+            except Exception:
+                return _failure(_internal_tool_error(tool_name))
 
         return wrapped
 
@@ -199,16 +195,15 @@ def _enrich_error(
     columns: list[str] | None = None,
     database_name: str | None = None,
     condition: str | None = None,
+    validation_id: str | None = None,
 ) -> ToolError:
     candidate_values = list(error.candidate_values) if error.candidate_values else None
     suggested_args_patch = dict(error.suggested_args_patch) if error.suggested_args_patch else None
     hint = error.hint or "Review the arguments and retry."
 
     if error.error_code == "database_not_found" and database_name:
-        candidate_values = candidate_values or _safe_suggestions(
-            lambda: client.suggest_databases(database_name)
-        )
-        hint = "Call csmar_list_databases, copy a trusted database_name verbatim, then retry with that value."
+        candidate_values = candidate_values or _safe_suggestions(lambda: client.suggest_databases(database_name))
+        hint = "Call csmar_list_databases, copy database_name verbatim, then retry with that value."
     elif error.error_code == "table_not_found" and table_code:
         candidate_values = candidate_values or _safe_suggestions(
             lambda: client.suggest_tables(table_code, database_name=database_name)
@@ -216,14 +211,16 @@ def _enrich_error(
         hint = "Use one of the suggested table codes, then retry."
     elif error.error_code == "field_not_found" and table_code and columns:
         candidate_values = candidate_values or _safe_suggestions(lambda: client.suggest_fields(table_code, columns))
-        hint = "Use csmar_get_table_schema to inspect the field list, then retry with valid columns."
+        hint = "Use csmar_get_table_schema to inspect fields, then retry with valid columns."
     elif error.error_code == "invalid_condition":
-        hint = "Fix the condition syntax and retry. Example: use '=' instead of '=='."
+        hint = "Fix condition syntax and retry. Example: use '=' instead of '=='."
         if suggested_args_patch is None and condition:
             local_issue = _local_condition_error(condition)
             if local_issue is not None:
                 suggested_args_patch = local_issue.suggested_args_patch
                 hint = local_issue.hint or hint
+    elif error.error_code == "invalid_arguments" and validation_id:
+        hint = "Call csmar_probe_query first and pass a valid non-expired validation_id."
 
     return ToolError(
         code=error.error_code,
@@ -235,28 +232,13 @@ def _enrich_error(
     )
 
 
-def _filter_fields(fields: list[str], field_query: str | None) -> list[str]:
-    if field_query is None:
-        return fields
-    needle = field_query.lower()
-    return [field for field in fields if needle in field.lower()]
-
-
-def _filter_preview_rows(rows: list[dict[str, Any]], preview_columns: list[str]) -> list[dict[str, Any]]:
-    filtered_rows: list[dict[str, Any]] = []
-    for row in rows:
-        filtered_rows.append({column: row.get(column) for column in preview_columns})
-    return filtered_rows
-
-
 mcp = FastMCP(
     name="csmar_mcp",
     instructions=(
-        "Lean CSMAR MCP for agent workflows. Always call csmar_list_databases before csmar_list_tables "
-        "or any database-scoped search, and copy database_name values verbatim instead of guessing or "
-        "paraphrasing them. Use csmar_catalog_search for targeted lookup, csmar_get_table_schema to "
-        "inspect fields, csmar_query_validate before downloading, and csmar_download_materialize only "
-        "after validation succeeds. Tools return concise structured JSON and short repair hints on failure."
+        "CSMAR MCP for StataAgent workflows. Use csmar_list_databases and csmar_list_tables for deterministic "
+        "enumeration, csmar_search_tables and csmar_search_fields for discovery, csmar_get_table_schema for precise "
+        "schema inspection, csmar_probe_query for feasibility validation, and csmar_materialize_query only after "
+        "probe success. Tools return concise structured JSON and repair hints on failure."
     ),
     json_response=True,
 )
@@ -264,7 +246,7 @@ mcp = FastMCP(
 
 @mcp.tool(
     name="csmar_list_databases",
-    description="List all purchased databases. Use this first when the user wants to explore what data is available.",
+    description="List all purchased databases.",
     annotations=ToolAnnotations(
         title="List Databases",
         readOnlyHint=True,
@@ -286,8 +268,7 @@ def csmar_list_databases() -> CallToolResult:
 @mcp.tool(
     name="csmar_list_tables",
     description=(
-        "List all tables in a purchased database. Always copy database_name verbatim from "
-        "csmar_list_databases instead of guessing or paraphrasing it."
+        "List all tables in a purchased database. Always copy database_name verbatim from csmar_list_databases."
     ),
     annotations=ToolAnnotations(
         title="List Tables",
@@ -308,7 +289,6 @@ def csmar_list_tables(database_name: str) -> CallToolResult:
     try:
         records = client.list_tables(params.database_name)
         result = ListTablesOutput(
-            database_name=params.database_name,
             items=[TableListItem(table_code=record.table_code, table_name=record.table_name) for record in records],
         )
         return _success(result.as_dict(), f"Returned {len(result.items)} tables from {params.database_name}.")
@@ -317,23 +297,23 @@ def csmar_list_tables(database_name: str) -> CallToolResult:
 
 
 @mcp.tool(
-    name="csmar_catalog_search",
+    name="csmar_search_tables",
     description=(
-        "Find candidate CSMAR tables by business topic, table code, or table name. If you pass "
-        "database_name, copy it verbatim from csmar_list_databases."
+        "Search table candidates by business topic, table code, or table name. If database_name is provided, copy it "
+        "verbatim from csmar_list_databases."
     ),
     annotations=ToolAnnotations(
-        title="Search CSMAR Catalog",
+        title="Search Tables",
         readOnlyHint=True,
         destructiveHint=False,
         idempotentHint=True,
         openWorldHint=True,
     ),
 )
-@_tool_error_boundary("csmar_catalog_search")
-def csmar_catalog_search(query: str, database_name: str | None = None, limit: int = 10) -> CallToolResult:
+@_tool_error_boundary("csmar_search_tables")
+def csmar_search_tables(query: str, database_name: str | None = None, limit: int = 10) -> CallToolResult:
     try:
-        params = CatalogSearchInput.model_validate(
+        params = SearchTablesInput.model_validate(
             {"query": query, "database_name": database_name, "limit": limit}
         )
     except ValidationError as error:
@@ -341,15 +321,78 @@ def csmar_catalog_search(query: str, database_name: str | None = None, limit: in
 
     client = get_client()
     try:
-        result = CatalogSearchOutput(items=client.search_catalog(params.query, params.database_name, params.limit))
+        result = SearchTablesOutput(
+            items=client.search_tables(params.query, database_name=params.database_name, limit=params.limit)
+        )
         return _success(result.as_dict(), f"Returned {len(result.items)} matching tables.")
     except CsmarMcpError as error:
         return _failure(_enrich_error(client, error, database_name=params.database_name))
 
 
 @mcp.tool(
+    name="csmar_search_fields",
+    description=(
+        "Search field candidates by semantic query and optional scope filters. Use role_hint/frequency_hint to bias "
+        "results toward variable intent."
+    ),
+    annotations=ToolAnnotations(
+        title="Search Fields",
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    ),
+)
+@_tool_error_boundary("csmar_search_fields")
+def csmar_search_fields(
+    query: str,
+    database_name: str | None = None,
+    table_code: str | None = None,
+    role_hint: str | None = None,
+    frequency_hint: str | None = None,
+    limit: int = 20,
+) -> CallToolResult:
+    try:
+        params = SearchFieldsInput.model_validate(
+            {
+                "query": query,
+                "database_name": database_name,
+                "table_code": table_code,
+                "role_hint": role_hint,
+                "frequency_hint": frequency_hint,
+                "limit": limit,
+            }
+        )
+    except ValidationError as error:
+        return _invalid_arguments(error)
+
+    client = get_client()
+    try:
+        result = SearchFieldsOutput(
+            items=client.search_fields(
+                query=params.query,
+                database_name=params.database_name,
+                table_code=params.table_code,
+                role_hint=params.role_hint,
+                frequency_hint=params.frequency_hint,
+                limit=params.limit,
+            )
+        )
+        return _success(result.as_dict(), f"Returned {len(result.items)} matching fields.")
+    except CsmarMcpError as error:
+        return _failure(
+            _enrich_error(
+                client,
+                error,
+                database_name=params.database_name,
+                table_code=params.table_code,
+            )
+        )
+
+
+@mcp.tool(
     name="csmar_get_table_schema",
-    description="Inspect a table schema and optionally fetch a tiny preview. Use this after catalog search and before validate or download.",
+    description="Return canonical schema for a table code. This interface is schema-only and returns no preview rows.",
     annotations=ToolAnnotations(
         title="Get Table Schema",
         readOnlyHint=True,
@@ -359,56 +402,36 @@ def csmar_catalog_search(query: str, database_name: str | None = None, limit: in
     ),
 )
 @_tool_error_boundary("csmar_get_table_schema")
-def csmar_get_table_schema(
-    table_code: str,
-    field_query: str | None = None,
-    preview_columns: list[str] | None = None,
-    preview_rows: int = 0,
-) -> CallToolResult:
+def csmar_get_table_schema(table_code: str) -> CallToolResult:
     try:
-        params = GetTableSchemaInput.model_validate(
-            {
-                "table_code": table_code,
-                "field_query": field_query,
-                "preview_columns": preview_columns,
-                "preview_rows": preview_rows,
-            }
-        )
+        params = GetTableSchemaInput.model_validate({"table_code": table_code})
     except ValidationError as error:
         return _invalid_arguments(error)
 
     client = get_client()
     try:
-        schema = client.read_table_schema(params.table_code)
-        filtered_fields = _filter_fields(schema.fields, params.field_query)
-        payload = TableSchemaOutput(
-            table_code=params.table_code,
-            field_count=len(filtered_fields),
-            fields=filtered_fields,
-        )
-
-        if params.preview_rows > 0 and params.preview_columns:
-            preview = client.preview(params.table_code)[: params.preview_rows]
-            payload.preview_rows = _filter_preview_rows(preview, params.preview_columns)
-
-        return _success(payload.as_dict(), f"Returned {payload.field_count} fields for {params.table_code}.")
+        result = client.read_table_schema(params.table_code)
+        return _success(result.as_dict(), f"Returned schema for {params.table_code}.")
     except CsmarMcpError as error:
         return _failure(_enrich_error(client, error, table_code=params.table_code))
 
 
 @mcp.tool(
-    name="csmar_query_validate",
-    description="Validate a query before download. Use this to confirm fields, condition syntax, row count, and a tiny sample.",
+    name="csmar_probe_query",
+    description=(
+        "Probe a query before materialization. Returns validation_id, query_fingerprint, row_count, sample_rows, "
+        "invalid_columns, and can_materialize."
+    ),
     annotations=ToolAnnotations(
-        title="Validate Query",
+        title="Probe Query",
         readOnlyHint=True,
         destructiveHint=False,
         idempotentHint=True,
         openWorldHint=True,
     ),
 )
-@_tool_error_boundary("csmar_query_validate")
-def csmar_query_validate(
+@_tool_error_boundary("csmar_probe_query")
+def csmar_probe_query(
     table_code: str,
     columns: list[str],
     condition: str | None = None,
@@ -417,7 +440,7 @@ def csmar_query_validate(
     sample_rows: int = 3,
 ) -> CallToolResult:
     try:
-        params = QueryValidateInput.model_validate(
+        params = ProbeQueryInput.model_validate(
             {
                 "table_code": table_code,
                 "columns": columns,
@@ -445,20 +468,29 @@ def csmar_query_validate(
     )
     remaining_seconds = client.get_rate_limit_remaining_seconds(cache_key)
     if remaining_seconds is not None:
-        cached = client.get_cached_validation(cache_key)
+        cached = client.get_cached_probe(cache_key)
         if cached is not None:
-            return _success(cached.as_dict(), f"Returned cached validation for {params.table_code}.")
+            return _success(cached.as_dict(), f"Returned cached probe for {params.table_code}.")
         return _failure(_rate_limited_error(remaining_seconds))
 
     try:
-        result = client.validate_query(params)
-        return _success(result.as_dict(), f"Validated query for {params.table_code}: {result.row_count} matching rows.")
+        result = client.probe_query(params)
+        if result.invalid_columns:
+            summary = f"Probe completed for {params.table_code} with invalid columns; materialization is blocked."
+        elif not result.can_materialize:
+            summary = f"Probe completed for {params.table_code} with zero rows; materialization is blocked."
+        else:
+            summary = (
+                f"Probe completed for {params.table_code}: {result.row_count} rows, "
+                f"validation_id={result.validation_id}."
+            )
+        return _success(result.as_dict(), summary)
     except CsmarMcpError as error:
         if error.error_code == "rate_limited":
             client.mark_rate_limited(cache_key)
-            cached = client.get_cached_validation(cache_key)
+            cached = client.get_cached_probe(cache_key)
             if cached is not None:
-                return _success(cached.as_dict(), f"Returned cached validation for {params.table_code}.")
+                return _success(cached.as_dict(), f"Returned cached probe for {params.table_code}.")
             error.retry_after_seconds = client.get_rate_limit_remaining_seconds(cache_key)
         return _failure(
             _enrich_error(
@@ -472,148 +504,54 @@ def csmar_query_validate(
 
 
 @mcp.tool(
-    name="csmar_download_materialize",
-    description="Download a validated query to local files. Use this only after csmar_query_validate succeeds.",
+    name="csmar_materialize_query",
+    description="Materialize a validated query by validation_id into local files under output_dir.",
     annotations=ToolAnnotations(
-        title="Download And Materialize",
+        title="Materialize Query",
         readOnlyHint=False,
         destructiveHint=False,
         idempotentHint=False,
         openWorldHint=True,
     ),
 )
-@_tool_error_boundary("csmar_download_materialize")
-def csmar_download_materialize(
-    table_code: str,
-    columns: list[str],
-    output_dir: str,
-    condition: str | None = None,
-    start_date: str | None = None,
-    end_date: str | None = None,
-    download_id: str | None = None,
-) -> CallToolResult:
+@_tool_error_boundary("csmar_materialize_query")
+def csmar_materialize_query(validation_id: str, output_dir: str) -> CallToolResult:
     try:
-        payload: dict[str, Any] = {
-            "table_code": table_code,
-            "columns": columns,
-            "output_dir": output_dir,
-            "condition": condition,
-            "start_date": start_date,
-            "end_date": end_date,
-        }
-        if download_id is not None:
-            payload["download_id"] = download_id
-        params = DownloadMaterializeInput.model_validate(payload)
+        params = MaterializeQueryInput.model_validate(
+            {
+                "validation_id": validation_id,
+                "output_dir": output_dir,
+            }
+        )
     except ValidationError as error:
         return _invalid_arguments(error)
 
-    if params.condition:
-        local_issue = _local_condition_error(params.condition)
-        if local_issue is not None:
-            return _failure(_enrich_error(get_client(), local_issue, condition=params.condition))
-
     client = get_client()
-    cache_key = client.build_cache_key(
-        table_code=params.table_code,
-        columns=params.columns,
-        condition=params.condition,
-        start_date=params.start_date,
-        end_date=params.end_date,
-    )
-    remaining_seconds = client.get_rate_limit_remaining_seconds(cache_key)
-    if remaining_seconds is not None:
-        cached = client.get_cached_manifest(cache_key)
-        if cached is not None:
-            output = client.materialize_download(params, max_retries=0)
-            return _success(output.as_dict(), f"Returned cached download for {params.table_code}.")
-        return _failure(_rate_limited_error(remaining_seconds))
-
+    record = client.get_validation_record(params.validation_id)
     try:
-        available_fields = set(client.list_fields(params.table_code))
-        missing_columns = [column for column in params.columns if column not in available_fields]
-        if missing_columns:
-            return _failure(
-                ToolError(
-                    code="field_not_found",
-                    message="One or more requested columns do not exist in the table.",
-                    hint="Use csmar_get_table_schema to inspect the field list, then retry with valid columns.",
-                    candidate_values=client.suggest_fields(params.table_code, missing_columns) or None,
-                )
-            )
-
-        result = client.materialize_download(params)
-        return _success(result.as_dict(), f"Materialized download {result.download_id} with {result.file_count} files.")
+        result = client.materialize_query(params.validation_id, params.output_dir)
+        return _success(
+            result.as_dict(),
+            (
+                f"Materialized query {result.query_fingerprint} into {len(result.files)} files "
+                f"(download_id={result.download_id})."
+            ),
+        )
     except CsmarMcpError as error:
         if error.error_code == "rate_limited":
-            client.mark_rate_limited(cache_key)
-            cached = client.get_cached_manifest(cache_key)
-            if cached is not None:
-                output = client.materialize_download(params, max_retries=0)
-                return _success(output.as_dict(), f"Returned cached download for {params.table_code}.")
-            error.retry_after_seconds = client.get_rate_limit_remaining_seconds(cache_key)
+            cooldown_key = record.query_fingerprint if record is not None else params.validation_id
+            client.mark_rate_limited(cooldown_key)
+            error.retry_after_seconds = client.get_rate_limit_remaining_seconds(cooldown_key)
         return _failure(
             _enrich_error(
                 client,
                 error,
-                table_code=params.table_code,
-                columns=params.columns,
-                condition=params.condition,
+                table_code=record.table_code if record is not None else None,
+                columns=list(record.columns) if record is not None else None,
+                condition=record.condition if record is not None else None,
+                validation_id=params.validation_id,
             )
         )
-
-
-@mcp.resource(
-    "csmar://table/{table_code}/schema",
-    name="csmar_table_schema_resource",
-    description="Read the full field list for a table after you already know the table_code.",
-    mime_type="application/json",
-)
-def csmar_table_schema_resource(table_code: str) -> str:
-    client = get_client()
-    schema = client.read_table_schema(table_code)
-    return _json_text(schema.as_dict())
-
-
-@mcp.resource(
-    "csmar://artifacts/{download_id}/manifest",
-    name="csmar_artifact_manifest_resource",
-    description="Read the full extracted file list for a completed download.",
-    mime_type="application/json",
-)
-def csmar_artifact_manifest_resource(download_id: str) -> str:
-    client = get_client()
-    manifest = client.get_download_manifest(download_id)
-    if manifest is None:
-        raise RuntimeError("Unknown download_id. Call csmar_download_materialize first.")
-    return _json_text(manifest.as_dict())
-
-
-@mcp.prompt(
-    name="repair_csmar_request",
-    description="Use this prompt after a CSMAR tool error to produce a concrete retry plan.",
-)
-def repair_csmar_request(
-    error_code: str,
-    tool_name: str,
-    last_arguments: str | None = None,
-    message: str | None = None,
-) -> list[PromptMessage]:
-    parts = [
-        f"You are repairing a failed call to `{tool_name}`.",
-        f"Error code: `{error_code}`.",
-    ]
-    if message:
-        parts.append(f"Short error message: {message}")
-    if last_arguments:
-        parts.append(f"Last arguments: {last_arguments}")
-    if error_code == "database_not_found":
-        parts.append("Before retrying, call `csmar_list_databases` and copy database_name verbatim from its result.")
-    elif error_code == "internal_error":
-        parts.append("Retry the same tool once. If it fails again, simplify the request and inspect the MCP server logs.")
-    parts.append(
-        "Produce a concise retry plan with: 1) root cause guess, 2) minimal argument changes, 3) the exact next tool call."
-    )
-    return [PromptMessage(role="user", content=_text("\n".join(parts)))]
 
 
 def main(argv: Sequence[str] | None = None) -> None:

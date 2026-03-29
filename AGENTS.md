@@ -15,7 +15,7 @@
 
 ## Architecture
 
-- [csmar_mcp/server.py](csmar_mcp/server.py)：MCP tools/resources/prompts 注册，对外错误整形，服务启动入口。
+- [csmar_mcp/server.py](csmar_mcp/server.py)：MCP tools 注册，对外错误整形，服务启动入口。
 - [csmar_mcp/client.py](csmar_mcp/client.py)：CSMAR 上游调用、登录与重登、缓存、限流冷却、目录搜索、下载与解压。
 - [csmar_mcp/models.py](csmar_mcp/models.py)：Lean V2 请求/响应/错误模型与输入约束（日期格式、样本行数上限）。
 - [csmarapi/](csmarapi/)：上游 SDK 兼容层，尽量通过 [csmar_mcp/client.py](csmar_mcp/client.py) 访问，不在工具层直接散落调用。
@@ -34,13 +34,11 @@
 - 当前对外工具面：
   - `csmar_list_databases`
   - `csmar_list_tables`
-  - `csmar_catalog_search`
+  - `csmar_search_tables`
+  - `csmar_search_fields`
   - `csmar_get_table_schema`
-  - `csmar_query_validate`
-  - `csmar_download_materialize`
-- 资源面：
-  - `csmar://table/{table_code}/schema`
-  - `csmar://artifacts/{download_id}/manifest`
+  - `csmar_probe_query`
+  - `csmar_materialize_query`
 - 查询日期范围不做硬编码限制；仅校验 `YYYY-MM-DD` 格式与起止顺序，然后原样透传给 SDK。
 - 预览/样本行数保持小上限，以节省上下文。
 - 遇到上游限流时优先复用缓存并返回标准化 error_code，避免重复打上游。
