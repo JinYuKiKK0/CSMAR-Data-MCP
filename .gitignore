@@ -1,0 +1,7 @@
+.agents/
+.venv/
+uv.lock
+csmar-log.log
+CSMAR_PYTHON.md
+PLAN.md
+__pycache__/

@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "csmar": {
+      "command": "uv",
+      "args": [
+        "--directory",
+        "D:\\Developments\\PythonProject\\CSMAR-Data-MCP",
+        "run",
+        "csmar-mcp",
+        "--account",
+        "YOUR_ACCOUNT",
+        "--password",
+        "YOUR_PASSWORD"
+      ]
+    }
+  }
+}
