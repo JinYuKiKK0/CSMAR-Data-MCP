@@ -16,8 +16,12 @@ from .models import (
     CatalogSearchOutput,
     DownloadMaterializeInput,
     GetTableSchemaInput,
+    ListDatabasesOutput,
+    ListTablesInput,
+    ListTablesOutput,
     QueryValidateInput,
     TableSchemaOutput,
+    TableListItem,
     ToolError,
 )
 
@@ -211,13 +215,62 @@ def _filter_preview_rows(rows: list[dict[str, Any]], preview_columns: list[str])
 mcp = FastMCP(
     name="csmar_mcp",
     instructions=(
-        "Lean CSMAR MCP for agent workflows. Use csmar_catalog_search to find candidate tables, "
-        "csmar_get_table_schema to inspect fields, csmar_query_validate before downloading, and "
-        "csmar_download_materialize only after validation succeeds. Tools return concise structured "
-        "JSON and short repair hints on failure."
+        "Lean CSMAR MCP for agent workflows. Use csmar_list_databases and csmar_list_tables for "
+        "exploration, csmar_catalog_search for targeted lookup, csmar_get_table_schema to inspect "
+        "fields, csmar_query_validate before downloading, and csmar_download_materialize only after "
+        "validation succeeds. Tools return concise structured JSON and short repair hints on failure."
     ),
     json_response=True,
 )
+
+
+@mcp.tool(
+    name="csmar_list_databases",
+    description="List all purchased databases. Use this first when the user wants to explore what data is available.",
+    annotations=ToolAnnotations(
+        title="List Databases",
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    ),
+)
+def csmar_list_databases() -> CallToolResult:
+    client = get_client()
+    try:
+        result = ListDatabasesOutput(databases=client.list_databases())
+        return _success(result.as_dict(), f"Returned {len(result.databases)} purchased databases.")
+    except CsmarMcpError as error:
+        return _failure(_enrich_error(client, error))
+
+
+@mcp.tool(
+    name="csmar_list_tables",
+    description="List all tables in a purchased database. Use this after csmar_list_databases when exploring available data.",
+    annotations=ToolAnnotations(
+        title="List Tables",
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    ),
+)
+def csmar_list_tables(database_name: str) -> CallToolResult:
+    try:
+        params = ListTablesInput.model_validate({"database_name": database_name})
+    except ValidationError as error:
+        return _invalid_arguments(error)
+
+    client = get_client()
+    try:
+        records = client.list_tables(params.database_name)
+        result = ListTablesOutput(
+            database_name=params.database_name,
+            items=[TableListItem(table_code=record.table_code, table_name=record.table_name) for record in records],
+        )
+        return _success(result.as_dict(), f"Returned {len(result.items)} tables from {params.database_name}.")
+    except CsmarMcpError as error:
+        return _failure(_enrich_error(client, error, database_name=params.database_name))
 
 
 @mcp.tool(

@@ -64,6 +64,24 @@ class CatalogSearchInput(StrictModel):
     limit: int = Field(default=10, ge=1, le=20, description="Maximum number of tables to return.")
 
 
+class ListDatabasesOutput(StrictModel):
+    databases: list[str] = Field(..., description="Purchased database names.")
+
+
+class ListTablesInput(StrictModel):
+    database_name: str = Field(..., min_length=1, description="Purchased database name.")
+
+
+class TableListItem(StrictModel):
+    table_code: str = Field(..., description="Table code used in later tool calls.")
+    table_name: str = Field(..., description="Human-readable table name.")
+
+
+class ListTablesOutput(StrictModel):
+    database_name: str = Field(..., description="Purchased database name.")
+    items: list[TableListItem] = Field(..., description="Tables in the selected database.")
+
+
 class CatalogItem(StrictModel):
     table_code: str = Field(..., description="Table code used in later tool calls.")
     table_name: str = Field(..., description="Human-readable table name.")

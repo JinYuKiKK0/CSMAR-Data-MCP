@@ -6,8 +6,12 @@ Lean MCP server for CSMAR metadata discovery, query validation, and local downlo
 
 ### Tools
 
+- `csmar_list_databases`
+  Use this first when the user wants to explore which purchased databases are available.
+- `csmar_list_tables`
+  Use this after choosing a database to inspect all tables in that database.
 - `csmar_catalog_search`
-  Use this first when you do not know the table code yet.
+  Use this for targeted lookup when you already have a topic, likely table code, or likely table name.
 - `csmar_get_table_schema`
   Use this to inspect fields and request a tiny preview after you know the table code.
 - `csmar_query_validate`
@@ -35,6 +39,20 @@ Lean MCP server for CSMAR metadata discovery, query validation, and local downlo
 - No legacy compatibility layer: the server exposes one contract per tool and does not support `params`, batch wrappers, or alias fields.
 
 ## Tool Examples
+
+### `csmar_list_databases`
+
+```json
+{}
+```
+
+### `csmar_list_tables`
+
+```json
+{
+  "database_name": "财务报表"
+}
+```
 
 ### `csmar_catalog_search`
 

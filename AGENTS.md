@@ -32,6 +32,8 @@
 - 认证仅通过 CLI 参数 --account 与 --password，不新增 .env 读取路径。
 - 运行时固定默认值：lang=0、belong=0、poll_interval_seconds=3、poll_timeout_seconds=900、cache_ttl_minutes=30。
 - 当前对外工具面：
+  - `csmar_list_databases`
+  - `csmar_list_tables`
   - `csmar_catalog_search`
   - `csmar_get_table_schema`
   - `csmar_query_validate`
