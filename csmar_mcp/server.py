@@ -3,8 +3,8 @@ from __future__ import annotations
 import argparse
 import json
 from dataclasses import dataclass
-from functools import lru_cache
-from typing import Any, Sequence
+from functools import lru_cache, wraps
+from typing import Any, Callable, Sequence
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult, PromptMessage, TextContent, ToolAnnotations
@@ -161,6 +161,36 @@ def _rate_limited_error(remaining_seconds: int) -> ToolError:
     )
 
 
+def _safe_suggestions(fetcher: Callable[[], list[str]]) -> list[str] | None:
+    try:
+        suggestions = fetcher()
+    except Exception:
+        return None
+    return suggestions or None
+
+
+def _internal_tool_error(tool_name: str, error: Exception) -> ToolError:
+    return ToolError(
+        code="internal_error",
+        message=f"The MCP server hit an internal error while running {tool_name}.",
+        hint="Retry the same tool once. If it fails again, simplify the request or inspect the MCP server logs.",
+    )
+
+
+def _tool_error_boundary(tool_name: str) -> Callable[[Callable[..., CallToolResult]], Callable[..., CallToolResult]]:
+    def decorator(func: Callable[..., CallToolResult]) -> Callable[..., CallToolResult]:
+        @wraps(func)
+        def wrapped(*args: Any, **kwargs: Any) -> CallToolResult:
+            try:
+                return func(*args, **kwargs)
+            except Exception as error:
+                return _failure(_internal_tool_error(tool_name, error))
+
+        return wrapped
+
+    return decorator
+
+
 def _enrich_error(
     client: CsmarClient,
     error: CsmarMcpError,
@@ -174,11 +204,18 @@ def _enrich_error(
     suggested_args_patch = dict(error.suggested_args_patch) if error.suggested_args_patch else None
     hint = error.hint or "Review the arguments and retry."
 
-    if error.error_code == "table_not_found" and table_code:
-        candidate_values = client.suggest_tables(table_code, database_name=database_name) or None
+    if error.error_code == "database_not_found" and database_name:
+        candidate_values = candidate_values or _safe_suggestions(
+            lambda: client.suggest_databases(database_name)
+        )
+        hint = "Call csmar_list_databases, copy a trusted database_name verbatim, then retry with that value."
+    elif error.error_code == "table_not_found" and table_code:
+        candidate_values = candidate_values or _safe_suggestions(
+            lambda: client.suggest_tables(table_code, database_name=database_name)
+        )
         hint = "Use one of the suggested table codes, then retry."
     elif error.error_code == "field_not_found" and table_code and columns:
-        candidate_values = candidate_values or client.suggest_fields(table_code, columns) or None
+        candidate_values = candidate_values or _safe_suggestions(lambda: client.suggest_fields(table_code, columns))
         hint = "Use csmar_get_table_schema to inspect the field list, then retry with valid columns."
     elif error.error_code == "invalid_condition":
         hint = "Fix the condition syntax and retry. Example: use '=' instead of '=='."
@@ -215,10 +252,11 @@ def _filter_preview_rows(rows: list[dict[str, Any]], preview_columns: list[str])
 mcp = FastMCP(
     name="csmar_mcp",
     instructions=(
-        "Lean CSMAR MCP for agent workflows. Use csmar_list_databases and csmar_list_tables for "
-        "exploration, csmar_catalog_search for targeted lookup, csmar_get_table_schema to inspect "
-        "fields, csmar_query_validate before downloading, and csmar_download_materialize only after "
-        "validation succeeds. Tools return concise structured JSON and short repair hints on failure."
+        "Lean CSMAR MCP for agent workflows. Always call csmar_list_databases before csmar_list_tables "
+        "or any database-scoped search, and copy database_name values verbatim instead of guessing or "
+        "paraphrasing them. Use csmar_catalog_search for targeted lookup, csmar_get_table_schema to "
+        "inspect fields, csmar_query_validate before downloading, and csmar_download_materialize only "
+        "after validation succeeds. Tools return concise structured JSON and short repair hints on failure."
     ),
     json_response=True,
 )
@@ -235,6 +273,7 @@ mcp = FastMCP(
         openWorldHint=True,
     ),
 )
+@_tool_error_boundary("csmar_list_databases")
 def csmar_list_databases() -> CallToolResult:
     client = get_client()
     try:
@@ -246,7 +285,10 @@ def csmar_list_databases() -> CallToolResult:
 
 @mcp.tool(
     name="csmar_list_tables",
-    description="List all tables in a purchased database. Use this after csmar_list_databases when exploring available data.",
+    description=(
+        "List all tables in a purchased database. Always copy database_name verbatim from "
+        "csmar_list_databases instead of guessing or paraphrasing it."
+    ),
     annotations=ToolAnnotations(
         title="List Tables",
         readOnlyHint=True,
@@ -255,6 +297,7 @@ def csmar_list_databases() -> CallToolResult:
         openWorldHint=True,
     ),
 )
+@_tool_error_boundary("csmar_list_tables")
 def csmar_list_tables(database_name: str) -> CallToolResult:
     try:
         params = ListTablesInput.model_validate({"database_name": database_name})
@@ -275,7 +318,10 @@ def csmar_list_tables(database_name: str) -> CallToolResult:
 
 @mcp.tool(
     name="csmar_catalog_search",
-    description="Find candidate CSMAR tables by business topic, table code, or table name. Use this first when you do not already know the table_code.",
+    description=(
+        "Find candidate CSMAR tables by business topic, table code, or table name. If you pass "
+        "database_name, copy it verbatim from csmar_list_databases."
+    ),
     annotations=ToolAnnotations(
         title="Search CSMAR Catalog",
         readOnlyHint=True,
@@ -284,6 +330,7 @@ def csmar_list_tables(database_name: str) -> CallToolResult:
         openWorldHint=True,
     ),
 )
+@_tool_error_boundary("csmar_catalog_search")
 def csmar_catalog_search(query: str, database_name: str | None = None, limit: int = 10) -> CallToolResult:
     try:
         params = CatalogSearchInput.model_validate(
@@ -311,6 +358,7 @@ def csmar_catalog_search(query: str, database_name: str | None = None, limit: in
         openWorldHint=True,
     ),
 )
+@_tool_error_boundary("csmar_get_table_schema")
 def csmar_get_table_schema(
     table_code: str,
     field_query: str | None = None,
@@ -359,6 +407,7 @@ def csmar_get_table_schema(
         openWorldHint=True,
     ),
 )
+@_tool_error_boundary("csmar_query_validate")
 def csmar_query_validate(
     table_code: str,
     columns: list[str],
@@ -433,6 +482,7 @@ def csmar_query_validate(
         openWorldHint=True,
     ),
 )
+@_tool_error_boundary("csmar_download_materialize")
 def csmar_download_materialize(
     table_code: str,
     columns: list[str],
@@ -556,6 +606,10 @@ def repair_csmar_request(
         parts.append(f"Short error message: {message}")
     if last_arguments:
         parts.append(f"Last arguments: {last_arguments}")
+    if error_code == "database_not_found":
+        parts.append("Before retrying, call `csmar_list_databases` and copy database_name verbatim from its result.")
+    elif error_code == "internal_error":
+        parts.append("Retry the same tool once. If it fails again, simplify the request and inspect the MCP server logs.")
     parts.append(
         "Produce a concise retry plan with: 1) root cause guess, 2) minimal argument changes, 3) the exact next tool call."
     )

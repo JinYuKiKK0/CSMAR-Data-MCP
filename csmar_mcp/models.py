@@ -59,7 +59,7 @@ class CatalogSearchInput(StrictModel):
     database_name: str | None = Field(
         default=None,
         min_length=1,
-        description="Optional purchased database name used to narrow the search.",
+        description="Optional purchased database name copied verbatim from csmar_list_databases.",
     )
     limit: int = Field(default=10, ge=1, le=20, description="Maximum number of tables to return.")
 
@@ -69,7 +69,11 @@ class ListDatabasesOutput(StrictModel):
 
 
 class ListTablesInput(StrictModel):
-    database_name: str = Field(..., min_length=1, description="Purchased database name.")
+    database_name: str = Field(
+        ...,
+        min_length=1,
+        description="Purchased database name copied verbatim from csmar_list_databases.",
+    )
 
 
 class TableListItem(StrictModel):

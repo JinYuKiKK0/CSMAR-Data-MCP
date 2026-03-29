@@ -9,7 +9,7 @@ Lean MCP server for CSMAR metadata discovery, query validation, and local downlo
 - `csmar_list_databases`
   Use this first when the user wants to explore which purchased databases are available.
 - `csmar_list_tables`
-  Use this after choosing a database to inspect all tables in that database.
+  Use this after choosing a database to inspect all tables in that database. Copy `database_name` verbatim from `csmar_list_databases`.
 - `csmar_catalog_search`
   Use this for targeted lookup when you already have a topic, likely table code, or likely table name.
 - `csmar_get_table_schema`
@@ -35,6 +35,7 @@ Lean MCP server for CSMAR metadata discovery, query validation, and local downlo
 
 - Lean JSON: tool results only contain the minimum fields needed for the next decision.
 - Agent-friendly errors: failures return `code`, `message`, `hint`, and only add `retry_after_seconds`, `candidate_values`, or `suggested_args_patch` when needed.
+- Database names are strict: call `csmar_list_databases` first and copy `database_name` values verbatim instead of guessing or paraphrasing them.
 - No hard-coded time window: `start_date` and `end_date` are validated for format and ordering only, then passed through to the SDK.
 - No legacy compatibility layer: the server exposes one contract per tool and does not support `params`, batch wrappers, or alias fields.
 
@@ -50,7 +51,7 @@ Lean MCP server for CSMAR metadata discovery, query validation, and local downlo
 
 ```json
 {
-  "database_name": "财务报表"
+  "database_name": "股票市场交易"
 }
 ```
 
@@ -146,4 +147,5 @@ uv run csmar-mcp --account YOUR_ACCOUNT --password YOUR_PASSWORD
 
 - The server logs in automatically and retries once when authentication expires.
 - Validation and download requests reuse local cache when possible to reduce repeated upstream calls.
+- Invalid `database_name` guesses return `database_not_found` with repair guidance instead of a generic upstream failure.
 - Tool responses never inline full datasets or full file manifests.

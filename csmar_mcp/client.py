@@ -206,6 +206,30 @@ class CsmarClient:
 
         return get_close_matches(table_code, code_pool, n=limit, cutoff=0.3)
 
+    def suggest_databases(self, database_name: str, limit: int = 5) -> list[str]:
+        normalized_query = database_name.strip().lower()
+        if not normalized_query:
+            return []
+
+        matches: list[tuple[float, str]] = []
+        for candidate in self.list_databases():
+            lowered_candidate = candidate.lower()
+            score = max(
+                SequenceMatcher(None, normalized_query, lowered_candidate).ratio(),
+                SequenceMatcher(None, normalized_query, lowered_candidate.replace("数据库", "")).ratio(),
+            )
+            if normalized_query in lowered_candidate or lowered_candidate in normalized_query:
+                score = max(score, 0.9)
+            if score >= 0.45:
+                matches.append((score, candidate))
+
+        matches.sort(key=lambda item: (-item[0], item[1]))
+        suggestions = self._deduplicate([candidate for _, candidate in matches])
+        if suggestions:
+            return suggestions[:limit]
+
+        return get_close_matches(database_name, self.list_databases(), n=limit, cutoff=0.45)
+
     def suggest_fields(self, table_code: str, columns: list[str], limit: int = 5) -> list[str]:
         field_pool = self.list_fields(table_code)
         suggestions: list[str] = []
@@ -601,17 +625,27 @@ class CsmarClient:
         return self._request_with_reauth(requester)
 
     def _request_with_reauth(self, requester: Callable[[], dict[str, Any]]) -> dict[str, Any]:
-        self._ensure_login()
-        response = requester()
-
-        if self._is_auth_error(response):
-            with self._lock:
-                self._login()
+        try:
+            self._ensure_login()
             response = requester()
 
-        if response.get("code") != 0:
-            raise self._to_error(response)
-        return response
+            if self._is_auth_error(response):
+                with self._lock:
+                    self._login()
+                response = requester()
+
+            if response.get("code") != 0:
+                raise self._to_error(response)
+            return response
+        except CsmarMcpError:
+            raise
+        except Exception as error:
+            raise CsmarMcpError(
+                "upstream_error",
+                "CSMAR did not return a valid response.",
+                hint="Retry the same request. If it fails again, narrow the request and inspect the server logs.",
+                raw_message=str(error),
+            ) from error
 
     def _ensure_login(self) -> None:
         with self._lock:
@@ -692,6 +726,11 @@ class CsmarClient:
             error_code = "auth_failed"
         elif any(token in lowered_message for token in ("purchase", "permission", "authorized")):
             error_code = "not_purchased"
+        elif (
+            any(token in lowered_message for token in ("database", "db", "数据库"))
+            and any(token in lowered_message for token in ("not exist", "does not exist", "missing", "不存在"))
+        ):
+            error_code = "database_not_found"
         elif "table" in lowered_message and any(token in lowered_message for token in ("not", "exist", "missing")):
             error_code = "table_not_found"
         elif "field" in lowered_message and any(token in lowered_message for token in ("not", "exist", "missing")):
@@ -714,6 +753,7 @@ class CsmarClient:
     def _summarize_error(self, error_code: str) -> str:
         messages = {
             "auth_failed": "Authentication with CSMAR failed.",
+            "database_not_found": "The database_name was not found.",
             "not_purchased": "The requested database or table is not available to this account.",
             "table_not_found": "The table_code was not found.",
             "field_not_found": "One or more requested columns do not exist in the table.",
@@ -728,6 +768,7 @@ class CsmarClient:
     def _default_hint(self, error_code: str) -> str:
         hints = {
             "auth_failed": "Check the account and password, then restart the MCP server.",
+            "database_not_found": "Call csmar_list_databases, copy a returned database_name verbatim, then retry.",
             "not_purchased": "Choose a table from a purchased database before retrying.",
             "table_not_found": "Use csmar_catalog_search to find a valid table_code, then retry.",
             "field_not_found": "Use csmar_get_table_schema to inspect the field list, then retry.",
