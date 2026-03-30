@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from difflib import SequenceMatcher, get_close_matches
+from difflib import SequenceMatcher
 
 from ..core.errors import CsmarError
 from ..core.types import CatalogRecord, FieldMatch, FieldSchemaRecord, TableMatch
@@ -135,52 +135,6 @@ class MetadataService:
         matches.sort(key=lambda item: (-item.score, item.table_code, item.field_name))
         return matches[:limit]
 
-    def suggest_tables(self, table_code: str, database_name: str | None = None, limit: int = 5) -> list[str]:
-        records = self.search_tables(table_code, database_name=database_name, limit=max(limit, 10))
-        suggestions = [f"{item.table_code} ({item.table_name})" for item in records]
-        if suggestions:
-            return suggestions[:limit]
-
-        databases = [database_name] if database_name else self.list_databases()
-        code_pool: list[str] = []
-        for db_name in databases:
-            code_pool.extend(record.table_code for record in self.list_tables(db_name))
-
-        return get_close_matches(table_code, code_pool, n=limit, cutoff=0.3)
-
-    def suggest_databases(self, database_name: str, limit: int = 5) -> list[str]:
-        normalized_query = database_name.strip().lower()
-        if not normalized_query:
-            return []
-
-        matches: list[tuple[float, str]] = []
-        for candidate in self.list_databases():
-            lowered_candidate = candidate.lower()
-            score = max(
-                SequenceMatcher(None, normalized_query, lowered_candidate).ratio(),
-                SequenceMatcher(None, normalized_query, lowered_candidate.replace("数据库", "")).ratio(),
-            )
-            if normalized_query in lowered_candidate or lowered_candidate in normalized_query:
-                score = max(score, 0.9)
-            if score >= 0.45:
-                matches.append((score, candidate))
-
-        matches.sort(key=lambda item: (-item[0], item[1]))
-        suggestions = self._deduplicate([candidate for _, candidate in matches])
-        if suggestions:
-            return suggestions[:limit]
-
-        return get_close_matches(database_name, self.list_databases(), n=limit, cutoff=0.45)
-
-    def suggest_fields(self, table_code: str, columns: list[str], limit: int = 5) -> list[str]:
-        field_pool = [item.field_name for item in self.list_field_schema_items(table_code)]
-        suggestions: list[str] = []
-        for column in columns:
-            for candidate in get_close_matches(column, field_pool, n=limit, cutoff=0.5):
-                if candidate not in suggestions:
-                    suggestions.append(candidate)
-        return suggestions[:limit]
-
     def _resolve_table_candidates(
         self,
         *,
@@ -198,7 +152,6 @@ class MetadataService:
                     "table_not_found",
                     "The table_code was not found.",
                     hint="Use csmar_search_tables to find a valid table_code, then retry.",
-                    candidate_values=self.suggest_tables(table_code, database_name=database_name),
                 )
             return candidates
 
@@ -366,13 +319,3 @@ class MetadataService:
                 add_term(term)
 
         return expanded
-
-    def _deduplicate(self, values: list[str]) -> list[str]:
-        unique_values: list[str] = []
-        seen: set[str] = set()
-        for value in values:
-            if value in seen:
-                continue
-            seen.add(value)
-            unique_values.append(value)
-        return unique_values

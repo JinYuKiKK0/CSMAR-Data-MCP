@@ -97,15 +97,6 @@ class CsmarClient:
             )
         ]
 
-    def suggest_tables(self, table_code: str, database_name: str | None = None, limit: int = 5) -> list[str]:
-        return self._metadata.suggest_tables(table_code, database_name=database_name, limit=limit)
-
-    def suggest_databases(self, database_name: str, limit: int = 5) -> list[str]:
-        return self._metadata.suggest_databases(database_name, limit=limit)
-
-    def suggest_fields(self, table_code: str, columns: list[str], limit: int = 5) -> list[str]:
-        return self._metadata.suggest_fields(table_code, columns, limit=limit)
-
     def build_cache_key(
         self,
         *,

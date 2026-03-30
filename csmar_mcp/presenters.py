@@ -35,7 +35,6 @@ def invalid_arguments(error: ValidationError) -> CallToolResult:
         code="invalid_arguments",
         message="The tool arguments are invalid.",
         hint="Fix the invalid fields and retry with the same tool.",
-        candidate_values=issues[:5] or None,
     )
     return failure(tool_error)
 
@@ -62,14 +61,6 @@ def tool_error_boundary(tool_name: str) -> Callable[[Callable[..., CallToolResul
     return decorator
 
 
-def safe_suggestions(fetcher: Callable[[], list[str]]) -> list[str] | None:
-    try:
-        suggestions = fetcher()
-    except Exception:
-        return None
-    return suggestions or None
-
-
 def enrich_error(
     client: CsmarClient,
     error: CsmarError,
@@ -80,20 +71,14 @@ def enrich_error(
     condition: str | None = None,
     validation_id: str | None = None,
 ) -> ToolError:
-    candidate_values = list(error.candidate_values) if error.candidate_values else None
     suggested_args_patch = dict(error.suggested_args_patch) if error.suggested_args_patch else None
     hint = error.hint or "Review the arguments and retry."
 
-    if error.error_code == "database_not_found" and database_name:
-        candidate_values = candidate_values or safe_suggestions(lambda: client.suggest_databases(database_name))
+    if error.error_code == "database_not_found":
         hint = "Call csmar_list_databases, copy database_name verbatim, then retry with that value."
-    elif error.error_code == "table_not_found" and table_code:
-        candidate_values = candidate_values or safe_suggestions(
-            lambda: client.suggest_tables(table_code, database_name=database_name)
-        )
-        hint = "Use one of the suggested table codes, then retry."
-    elif error.error_code == "field_not_found" and table_code and columns:
-        candidate_values = candidate_values or safe_suggestions(lambda: client.suggest_fields(table_code, columns))
+    elif error.error_code == "table_not_found":
+        hint = "Use csmar_search_tables to find a valid table_code, then retry."
+    elif error.error_code == "field_not_found":
         hint = "Use csmar_get_table_schema to inspect fields, then retry with valid columns."
     elif error.error_code == "invalid_condition":
         hint = "Fix condition syntax and retry. Example: use '=' instead of '=='."
@@ -114,6 +99,5 @@ def enrich_error(
         message=error.message,
         hint=hint,
         retry_after_seconds=error.retry_after_seconds,
-        candidate_values=candidate_values,
         suggested_args_patch=suggested_args_patch,
     )

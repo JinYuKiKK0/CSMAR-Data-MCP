@@ -12,7 +12,6 @@ class CsmarError(Exception):
         hint: str | None = None,
         upstream_code: int | None = None,
         retry_after_seconds: int | None = None,
-        candidate_values: list[str] | None = None,
         suggested_args_patch: dict[str, Any] | None = None,
         raw_message: str | None = None,
     ) -> None:
@@ -22,6 +21,5 @@ class CsmarError(Exception):
         self.hint = hint
         self.upstream_code = upstream_code
         self.retry_after_seconds = retry_after_seconds
-        self.candidate_values = candidate_values
         self.suggested_args_patch = suggested_args_patch
         self.raw_message = raw_message

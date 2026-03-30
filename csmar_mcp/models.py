@@ -246,10 +246,6 @@ class ToolError(StrictModel):
         default=None,
         description="Retry delay in seconds when the error is rate-limit related.",
     )
-    candidate_values: list[str] | None = Field(
-        default=None,
-        description="Suggested replacement values such as similar fields or tables.",
-    )
     suggested_args_patch: dict[str, Any] | None = Field(
         default=None,
         description="Minimal argument patch that the caller can apply before retrying.",
