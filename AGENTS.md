@@ -4,7 +4,7 @@
 
 - 本项目是一个对接 CSMAR 数据库接口的 MCP 服务器。
 - 主要职责：目录搜索、表结构检查、查询校验、下载物化到本地。
-- 交互式工具不返回完整数据集，只返回元数据、计数、小样本和本地工件清单。
+- 交互式工具不返回完整数据集（完整数据通过structuredContent返回），只返回元数据、计数、小样本和本地工件清单。
 
 ## Code Style
 
@@ -15,10 +15,15 @@
 
 ## Architecture
 
-- [csmar_mcp/server.py](csmar_mcp/server.py)：MCP tools 注册，对外错误整形，服务启动入口。
-- [csmar_mcp/client.py](csmar_mcp/client.py)：CSMAR 上游调用、登录与重登、缓存、限流冷却、目录搜索、下载与解压。
-- [csmar_mcp/models.py](csmar_mcp/models.py)：Lean V2 请求/响应/错误模型与输入约束（日期格式、样本行数上限）。
-- [csmarapi/](csmarapi/)：上游 SDK 兼容层，尽量通过 [csmar_mcp/client.py](csmar_mcp/client.py) 访问，不在工具层直接散落调用。
+- [csmar_mcp/server.py](csmar_mcp/server.py)：薄 MCP 入口；负责 tools 注册、入参校验后的调用编排与服务启动。
+- [csmar_mcp/runtime.py](csmar_mcp/runtime.py)：CLI 参数解析、运行时固定默认值与 `CsmarClient` 单例装配。
+- [csmar_mcp/presenters.py](csmar_mcp/presenters.py)：`CallToolResult`/`ToolError` 整形、错误 enrich 与对外返回包装。
+- [csmar_mcp/client.py](csmar_mcp/client.py)：兼容 façade；组装内部 services，并在 core 类型与 MCP DTO 之间做转换。
+- [csmar_mcp/models.py](csmar_mcp/models.py)：对外 MCP 请求/响应/错误模型与输入约束（日期格式、样本行数上限）。
+- [csmar_mcp/core/](csmar_mcp/core/)：内部核心类型与统一错误对象；不依赖 MCP transport。
+- [csmar_mcp/services/](csmar_mcp/services/)：应用服务层。`metadata.py` 负责目录/schema/搜索，`query.py` 负责 probe/materialize、缓存 key 与本地查询规则。
+- [csmar_mcp/infra/](csmar_mcp/infra/)：基础设施层。`csmar_gateway.py` 负责上游 SDK 访问、登录/重登与响应归一化，`state.py` 负责进程内缓存、validation registry 与限流冷却状态。
+- [csmarapi/](csmarapi/)：上游 SDK 兼容层，视为遗留边界；仅允许通过 [csmar_mcp/infra/csmar_gateway.py](csmar_mcp/infra/csmar_gateway.py) 访问，不在 tools 或 services 层直接散落调用。
 
 ## Build and Test
 
