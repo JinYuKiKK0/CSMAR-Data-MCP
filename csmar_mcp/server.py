@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Sequence
 
 from mcp.server.fastmcp import FastMCP
@@ -29,8 +30,9 @@ mcp = FastMCP(
     name="csmar_mcp",
     instructions=(
         "CSMAR MCP for StataAgent workflows. Use csmar_list_databases and csmar_list_tables for deterministic "
-        "enumeration, csmar_search_tables and csmar_search_fields for discovery, csmar_get_table_schema for precise "
-        "schema inspection, csmar_probe_query for feasibility validation, and csmar_materialize_query only after "
+        "enumeration, csmar_search_tables (max 5 candidates) to narrow scope, csmar_get_table_schema for precise "
+        "schema inspection, csmar_search_fields only as deterministic field lookup, csmar_probe_query for "
+        "feasibility validation, and csmar_materialize_query only after "
         "probe success. Tools return concise structured JSON and repair hints on failure."
     ),
     json_response=True,
@@ -39,6 +41,53 @@ mcp = FastMCP(
 
 def _client() -> CsmarClient:
     return get_client()
+
+
+def _now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _safe_log_trace(
+    client: CsmarClient,
+    *,
+    tool_name: str,
+    request_payload: dict[str, object],
+    started_at: datetime,
+    result_summary: dict[str, object] | None,
+    cached: bool,
+    query_fingerprint: str | None = None,
+    validation_id: str | None = None,
+    error: CsmarError | None = None,
+    error_payload: dict[str, object] | None = None,
+) -> None:
+    normalized_error = error_payload
+    upstream_code: int | None = None
+    raw_message: str | None = None
+    if error is not None:
+        normalized_error = {
+            "code": error.error_code,
+            "message": error.message,
+            "hint": error.hint,
+        }
+        upstream_code = error.upstream_code
+        raw_message = error.raw_message
+
+    try:
+        client.log_tool_trace(
+            tool_name=tool_name,
+            request_payload=request_payload,
+            result_summary=result_summary,
+            error=normalized_error,
+            query_fingerprint=query_fingerprint,
+            validation_id=validation_id,
+            cached=cached,
+            started_at=started_at,
+            completed_at=_now_utc(),
+            upstream_code=upstream_code,
+            raw_message=raw_message,
+        )
+    except Exception:
+        return
 
 
 @mcp.tool(
@@ -55,10 +104,30 @@ def _client() -> CsmarClient:
 @tool_error_boundary("csmar_list_databases")
 def csmar_list_databases() -> CallToolResult:
     client = _client()
+    started_at = _now_utc()
+    request_payload: dict[str, object] = {}
+    cached = client.has_cached_entry("databases", "all")
     try:
         result = ListDatabasesOutput(databases=client.list_databases())
+        _safe_log_trace(
+            client,
+            tool_name="csmar_list_databases",
+            request_payload=request_payload,
+            started_at=started_at,
+            result_summary={"count": len(result.databases)},
+            cached=cached,
+        )
         return success(result.as_dict(), f"Returned {len(result.databases)} purchased databases.")
     except CsmarError as error:
+        _safe_log_trace(
+            client,
+            tool_name="csmar_list_databases",
+            request_payload=request_payload,
+            started_at=started_at,
+            result_summary=None,
+            cached=cached,
+            error=error,
+        )
         return failure(enrich_error(client, error))
 
 
@@ -77,19 +146,54 @@ def csmar_list_databases() -> CallToolResult:
 )
 @tool_error_boundary("csmar_list_tables")
 def csmar_list_tables(database_name: str) -> CallToolResult:
+    started_at = _now_utc()
+    request_payload: dict[str, object] = {"database_name": database_name}
     try:
         params = ListTablesInput.model_validate({"database_name": database_name})
     except ValidationError as error:
+        try:
+            _safe_log_trace(
+                _client(),
+                tool_name="csmar_list_tables",
+                request_payload=request_payload,
+                started_at=started_at,
+                result_summary=None,
+                cached=False,
+                error_payload={
+                    "code": "invalid_arguments",
+                    "message": "The tool arguments are invalid.",
+                },
+            )
+        except Exception:
+            pass
         return invalid_arguments(error)
 
     client = _client()
+    cached = client.has_cached_entry("tables", params.database_name.strip())
     try:
         records = client.list_tables(params.database_name)
         result = ListTablesOutput(
             items=[TableListItem(table_code=record.table_code, table_name=record.table_name) for record in records],
         )
+        _safe_log_trace(
+            client,
+            tool_name="csmar_list_tables",
+            request_payload=params.as_dict(),
+            started_at=started_at,
+            result_summary={"count": len(result.items)},
+            cached=cached,
+        )
         return success(result.as_dict(), f"Returned {len(result.items)} tables from {params.database_name}.")
     except CsmarError as error:
+        _safe_log_trace(
+            client,
+            tool_name="csmar_list_tables",
+            request_payload=params.as_dict(),
+            started_at=started_at,
+            result_summary=None,
+            cached=cached,
+            error=error,
+        )
         return failure(enrich_error(client, error, database_name=params.database_name))
 
 
@@ -108,29 +212,66 @@ def csmar_list_tables(database_name: str) -> CallToolResult:
     ),
 )
 @tool_error_boundary("csmar_search_tables")
-def csmar_search_tables(query: str, database_name: str | None = None, limit: int = 10) -> CallToolResult:
+def csmar_search_tables(query: str, database_name: str | None = None, limit: int = 5) -> CallToolResult:
+    started_at = _now_utc()
+    request_payload: dict[str, object] = {"query": query, "database_name": database_name, "limit": limit}
     try:
         params = SearchTablesInput.model_validate(
             {"query": query, "database_name": database_name, "limit": limit}
         )
     except ValidationError as error:
+        try:
+            _safe_log_trace(
+                _client(),
+                tool_name="csmar_search_tables",
+                request_payload=request_payload,
+                started_at=started_at,
+                result_summary=None,
+                cached=False,
+                error_payload={
+                    "code": "invalid_arguments",
+                    "message": "The tool arguments are invalid.",
+                },
+            )
+        except Exception:
+            pass
         return invalid_arguments(error)
 
     client = _client()
+    cached = bool(
+        params.database_name and client.has_cached_entry("tables", params.database_name.strip())
+    )
     try:
         result = SearchTablesOutput(
             items=client.search_tables(params.query, database_name=params.database_name, limit=params.limit)
         )
+        _safe_log_trace(
+            client,
+            tool_name="csmar_search_tables",
+            request_payload=params.as_dict(),
+            started_at=started_at,
+            result_summary={"count": len(result.items)},
+            cached=cached,
+        )
         return success(result.as_dict(), f"Returned {len(result.items)} matching tables.")
     except CsmarError as error:
+        _safe_log_trace(
+            client,
+            tool_name="csmar_search_tables",
+            request_payload=params.as_dict(),
+            started_at=started_at,
+            result_summary=None,
+            cached=cached,
+            error=error,
+        )
         return failure(enrich_error(client, error, database_name=params.database_name))
 
 
 @mcp.tool(
     name="csmar_search_fields",
     description=(
-        "Search field candidates by semantic query and optional scope filters. Use role_hint/frequency_hint to bias "
-        "results toward variable intent."
+        "Search field candidates by deterministic literal/similarity matching and optional scope filters. "
+        "Use role_hint/frequency_hint as ranking bias only."
     ),
     annotations=ToolAnnotations(
         title="Search Fields",
@@ -149,6 +290,15 @@ def csmar_search_fields(
     frequency_hint: str | None = None,
     limit: int = 20,
 ) -> CallToolResult:
+    started_at = _now_utc()
+    request_payload: dict[str, object] = {
+        "query": query,
+        "database_name": database_name,
+        "table_code": table_code,
+        "role_hint": role_hint,
+        "frequency_hint": frequency_hint,
+        "limit": limit,
+    }
     try:
         params = SearchFieldsInput.model_validate(
             {
@@ -161,9 +311,25 @@ def csmar_search_fields(
             }
         )
     except ValidationError as error:
+        try:
+            _safe_log_trace(
+                _client(),
+                tool_name="csmar_search_fields",
+                request_payload=request_payload,
+                started_at=started_at,
+                result_summary=None,
+                cached=False,
+                error_payload={
+                    "code": "invalid_arguments",
+                    "message": "The tool arguments are invalid.",
+                },
+            )
+        except Exception:
+            pass
         return invalid_arguments(error)
 
     client = _client()
+    cached = bool(params.table_code and client.has_cached_entry("schema", params.table_code.strip()))
     try:
         result = SearchFieldsOutput(
             items=client.search_fields(
@@ -175,8 +341,25 @@ def csmar_search_fields(
                 limit=params.limit,
             )
         )
+        _safe_log_trace(
+            client,
+            tool_name="csmar_search_fields",
+            request_payload=params.as_dict(),
+            started_at=started_at,
+            result_summary={"count": len(result.items)},
+            cached=cached,
+        )
         return success(result.as_dict(), f"Returned {len(result.items)} matching fields.")
     except CsmarError as error:
+        _safe_log_trace(
+            client,
+            tool_name="csmar_search_fields",
+            request_payload=params.as_dict(),
+            started_at=started_at,
+            result_summary=None,
+            cached=cached,
+            error=error,
+        )
         return failure(
             enrich_error(
                 client,
@@ -200,16 +383,51 @@ def csmar_search_fields(
 )
 @tool_error_boundary("csmar_get_table_schema")
 def csmar_get_table_schema(table_code: str) -> CallToolResult:
+    started_at = _now_utc()
+    request_payload: dict[str, object] = {"table_code": table_code}
     try:
         params = GetTableSchemaInput.model_validate({"table_code": table_code})
     except ValidationError as error:
+        try:
+            _safe_log_trace(
+                _client(),
+                tool_name="csmar_get_table_schema",
+                request_payload=request_payload,
+                started_at=started_at,
+                result_summary=None,
+                cached=False,
+                error_payload={
+                    "code": "invalid_arguments",
+                    "message": "The tool arguments are invalid.",
+                },
+            )
+        except Exception:
+            pass
         return invalid_arguments(error)
 
     client = _client()
+    cached = client.has_cached_entry("schema", params.table_code.strip())
     try:
         result = client.read_table_schema(params.table_code)
+        _safe_log_trace(
+            client,
+            tool_name="csmar_get_table_schema",
+            request_payload=params.as_dict(),
+            started_at=started_at,
+            result_summary={"field_count": len(result.fields)},
+            cached=cached,
+        )
         return success(result.as_dict(), f"Returned schema for {params.table_code}.")
     except CsmarError as error:
+        _safe_log_trace(
+            client,
+            tool_name="csmar_get_table_schema",
+            request_payload=params.as_dict(),
+            started_at=started_at,
+            result_summary=None,
+            cached=cached,
+            error=error,
+        )
         return failure(enrich_error(client, error, table_code=params.table_code))
 
 
@@ -236,6 +454,15 @@ def csmar_probe_query(
     end_date: str | None = None,
     sample_rows: int = 3,
 ) -> CallToolResult:
+    started_at = _now_utc()
+    request_payload: dict[str, object] = {
+        "table_code": table_code,
+        "columns": columns,
+        "condition": condition,
+        "start_date": start_date,
+        "end_date": end_date,
+        "sample_rows": sample_rows,
+    }
     try:
         params = ProbeQueryInput.model_validate(
             {
@@ -248,9 +475,39 @@ def csmar_probe_query(
             }
         )
     except ValidationError as error:
+        try:
+            _safe_log_trace(
+                _client(),
+                tool_name="csmar_probe_query",
+                request_payload=request_payload,
+                started_at=started_at,
+                result_summary=None,
+                cached=False,
+                error_payload={
+                    "code": "invalid_arguments",
+                    "message": "The tool arguments are invalid.",
+                },
+            )
+        except Exception:
+            pass
         return invalid_arguments(error)
 
     client = _client()
+    cache_key = client.build_cache_key(
+        table_code=params.table_code,
+        columns=params.columns,
+        condition=params.condition,
+        start_date=params.start_date,
+        end_date=params.end_date,
+    )
+    query_fingerprint = client.build_query_fingerprint(
+        table_code=params.table_code,
+        columns=params.columns,
+        condition=params.condition,
+        start_date=params.start_date,
+        end_date=params.end_date,
+    )
+    cached = client.has_cached_probe(cache_key)
     try:
         result = client.probe_query(params)
         if result.invalid_columns:
@@ -262,8 +519,32 @@ def csmar_probe_query(
                 f"Probe completed for {params.table_code}: {result.row_count} rows, "
                 f"validation_id={result.validation_id}."
             )
+        _safe_log_trace(
+            client,
+            tool_name="csmar_probe_query",
+            request_payload=params.as_dict(),
+            started_at=started_at,
+            result_summary={
+                "row_count": result.row_count,
+                "can_materialize": result.can_materialize,
+                "invalid_columns_count": len(result.invalid_columns or []),
+            },
+            cached=cached,
+            query_fingerprint=result.query_fingerprint,
+            validation_id=result.validation_id,
+        )
         return success(result.as_dict(), summary)
     except CsmarError as error:
+        _safe_log_trace(
+            client,
+            tool_name="csmar_probe_query",
+            request_payload=params.as_dict(),
+            started_at=started_at,
+            result_summary=None,
+            cached=cached,
+            query_fingerprint=query_fingerprint,
+            error=error,
+        )
         return failure(
             enrich_error(
                 client,
@@ -288,6 +569,11 @@ def csmar_probe_query(
 )
 @tool_error_boundary("csmar_materialize_query")
 def csmar_materialize_query(validation_id: str, output_dir: str) -> CallToolResult:
+    started_at = _now_utc()
+    request_payload: dict[str, object] = {
+        "validation_id": validation_id,
+        "output_dir": output_dir,
+    }
     try:
         params = MaterializeQueryInput.model_validate(
             {
@@ -296,12 +582,44 @@ def csmar_materialize_query(validation_id: str, output_dir: str) -> CallToolResu
             }
         )
     except ValidationError as error:
+        try:
+            _safe_log_trace(
+                _client(),
+                tool_name="csmar_materialize_query",
+                request_payload=request_payload,
+                started_at=started_at,
+                result_summary=None,
+                cached=False,
+                error_payload={
+                    "code": "invalid_arguments",
+                    "message": "The tool arguments are invalid.",
+                },
+            )
+        except Exception:
+            pass
         return invalid_arguments(error)
 
     client = _client()
     record = client.get_validation_record(params.validation_id)
+    cached = False
+    if record is not None:
+        cached = client.has_cached_download(record.query_fingerprint, params.output_dir)
     try:
         result = client.materialize_query(params.validation_id, params.output_dir)
+        _safe_log_trace(
+            client,
+            tool_name="csmar_materialize_query",
+            request_payload=params.as_dict(),
+            started_at=started_at,
+            result_summary={
+                "download_id": result.download_id,
+                "file_count": len(result.files),
+                "row_count": result.row_count,
+            },
+            cached=cached,
+            query_fingerprint=result.query_fingerprint,
+            validation_id=params.validation_id,
+        )
         return success(
             result.as_dict(),
             (
@@ -310,6 +628,17 @@ def csmar_materialize_query(validation_id: str, output_dir: str) -> CallToolResu
             ),
         )
     except CsmarError as error:
+        _safe_log_trace(
+            client,
+            tool_name="csmar_materialize_query",
+            request_payload=params.as_dict(),
+            started_at=started_at,
+            result_summary=None,
+            cached=cached,
+            query_fingerprint=record.query_fingerprint if record is not None else None,
+            validation_id=params.validation_id,
+            error=error,
+        )
         return failure(
             enrich_error(
                 client,

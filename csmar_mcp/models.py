@@ -102,7 +102,7 @@ class SearchTablesInput(StrictModel):
         min_length=1,
         description="Optional purchased database name copied verbatim from csmar_list_databases.",
     )
-    limit: int = Field(default=10, ge=1, le=50, description="Maximum number of tables to return.")
+    limit: int = Field(default=5, ge=1, le=5, description="Maximum number of tables to return (hard cap: 5).")
 
 
 class SearchTableItem(StrictModel):
@@ -118,7 +118,11 @@ class SearchTablesOutput(StrictModel):
 
 
 class SearchFieldsInput(StrictModel):
-    query: str = Field(..., min_length=1, description="Semantic search text for field discovery.")
+    query: str = Field(
+        ...,
+        min_length=1,
+        description="Field lookup text for deterministic matching against field_name, label, and description.",
+    )
     database_name: str | None = Field(
         default=None,
         min_length=1,
@@ -129,8 +133,12 @@ class SearchFieldsInput(StrictModel):
         min_length=1,
         description="Optional table filter copied from csmar_search_tables or csmar_list_tables.",
     )
-    role_hint: str | None = Field(default=None, min_length=1, description="Optional role hint.")
-    frequency_hint: str | None = Field(default=None, min_length=1, description="Optional frequency hint.")
+    role_hint: str | None = Field(default=None, min_length=1, description="Optional role hint for ranking bias.")
+    frequency_hint: str | None = Field(
+        default=None,
+        min_length=1,
+        description="Optional frequency hint for ranking bias.",
+    )
     limit: int = Field(default=20, ge=1, le=50, description="Maximum number of fields to return.")
 
 
@@ -152,7 +160,10 @@ class SearchFieldItem(FieldSchemaItem):
     table_code: str = Field(..., description="Table code that contains this field.")
     table_name: str = Field(..., description="Human-readable table name.")
     database_name: str = Field(..., description="Purchased database that contains this field.")
-    why_matched: str = Field(..., description="Short reason why this field matches the query.")
+    why_matched: str = Field(
+        ...,
+        description="Short deterministic reason for match (exact/contains/similar + optional hint bias).",
+    )
     score: float = Field(..., ge=0.0, description="Relevance score in descending rank order.")
 
 

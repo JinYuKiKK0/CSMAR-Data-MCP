@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+from uuid import uuid4
 
 from .core.errors import CsmarError
 from .core.types import (
@@ -12,7 +15,7 @@ from .core.types import (
     ProbeSpec,
     ValidationRecord,
 )
-from .infra import CsmarGateway, InMemoryState
+from .infra import CsmarGateway, PersistentState
 from .models import (
     FieldSchemaItem,
     GetTableSchemaOutput,
@@ -39,8 +42,10 @@ class CsmarClient:
         poll_interval_seconds: int = 3,
         poll_timeout_seconds: int = 900,
         cache_ttl_minutes: int = 30,
+        state_dir: str | Path | None = None,
     ) -> None:
-        self._state = InMemoryState(cache_ttl_minutes=cache_ttl_minutes)
+        resolved_state_dir = Path(state_dir) if state_dir is not None else self._default_state_dir()
+        self._state = PersistentState(cache_ttl_minutes=cache_ttl_minutes, state_dir=resolved_state_dir)
         self._gateway = CsmarGateway(
             account=account,
             password=password,
@@ -52,13 +57,64 @@ class CsmarClient:
         self._metadata = MetadataService(self._gateway, self._state)
         self._query = QueryService(self._gateway, self._metadata, self._state)
 
+    def _default_state_dir(self) -> Path:
+        return (Path.cwd() / ".stata_agent" / "csmar_mcp").resolve()
+
+    def has_cached_entry(self, namespace: str, key: str) -> bool:
+        return self._state.has_cached(namespace, key)
+
+    def has_cached_probe(self, cache_key: str) -> bool:
+        return self._state.has_cached("probes", cache_key)
+
+    def has_cached_download(self, query_fingerprint: str, output_dir: str) -> bool:
+        cache_key = self._query.build_materialize_cache_key(
+            query_fingerprint=query_fingerprint,
+            output_dir=output_dir,
+        )
+        return self._state.has_cached("downloads", cache_key)
+
+    def log_tool_trace(
+        self,
+        *,
+        tool_name: str,
+        request_payload: dict[str, Any],
+        result_summary: dict[str, Any] | None,
+        error: dict[str, Any] | None,
+        query_fingerprint: str | None,
+        validation_id: str | None,
+        cached: bool,
+        started_at: datetime,
+        completed_at: datetime,
+        upstream_code: int | None = None,
+        raw_message: str | None = None,
+    ) -> str:
+        trace_id = f"trace_{uuid4().hex[:10]}"
+        self._state.add_tool_trace(
+            trace_id=trace_id,
+            tool_name=tool_name,
+            request_payload=request_payload,
+            result_summary=result_summary,
+            error=error,
+            query_fingerprint=query_fingerprint,
+            validation_id=validation_id,
+            cached=cached,
+            started_at=started_at,
+            completed_at=completed_at,
+            upstream_code=upstream_code,
+            raw_message=raw_message,
+        )
+        return trace_id
+
+    def get_tool_trace(self, trace_id: str) -> dict[str, Any] | None:
+        return self._state.get_tool_trace(trace_id)
+
     def list_databases(self) -> list[str]:
         return self._metadata.list_databases()
 
     def list_tables(self, database_name: str) -> list[CatalogRecord]:
         return self._metadata.list_tables(database_name)
 
-    def search_tables(self, query: str, database_name: str | None = None, limit: int = 10) -> list[SearchTableItem]:
+    def search_tables(self, query: str, database_name: str | None = None, limit: int = 5) -> list[SearchTableItem]:
         return [
             SearchTableItem(
                 table_code=item.table_code,

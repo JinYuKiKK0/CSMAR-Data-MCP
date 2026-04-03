@@ -95,3 +95,17 @@ class MaterializationResult:
     row_count: int
     archive_path: str
     audit: MaterializeAuditRecord
+
+
+@dataclass(frozen=True, slots=True)
+class CsmarToolTrace:
+    trace_id: str
+    tool_name: str
+    request_payload: dict[str, Any]
+    result_summary: dict[str, Any] | None
+    error: dict[str, Any] | None
+    query_fingerprint: str | None
+    validation_id: str | None
+    cached: bool
+    started_at: datetime
+    completed_at: datetime

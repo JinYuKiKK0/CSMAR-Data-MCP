@@ -5,37 +5,11 @@ from difflib import SequenceMatcher
 from ..core.errors import CsmarError
 from ..core.types import CatalogRecord, FieldMatch, FieldSchemaRecord, TableMatch
 from ..infra.csmar_gateway import CsmarGateway
-from ..infra.state import InMemoryState
-
-_SEMANTIC_QUERY_ALIASES: dict[str, tuple[str, ...]] = {
-    "roa": ("return on assets", "return on asset", "roaa", "asset return"),
-    "roaa": ("roa", "return on assets", "asset return"),
-    "资本充足率": (
-        "capital adequacy ratio",
-        "capital adequacy",
-        "capital ratio",
-        "car",
-    ),
-    "拨备覆盖率": (
-        "loan loss reserve coverage",
-        "loan loss provision coverage",
-        "allowance coverage",
-        "provision coverage",
-        "llr coverage",
-    ),
-    "不良贷款率": (
-        "non performing loan ratio",
-        "non-performing loan ratio",
-        "npl ratio",
-        "npl",
-    ),
-    "净息差": ("net interest margin", "nim"),
-    "净利差": ("net interest spread", "nis"),
-}
+from ..infra.state import PersistentState
 
 
 class MetadataService:
-    def __init__(self, gateway: CsmarGateway, state: InMemoryState) -> None:
+    def __init__(self, gateway: CsmarGateway, state: PersistentState) -> None:
         self._gateway = gateway
         self._state = state
 
@@ -71,8 +45,9 @@ class MetadataService:
     def read_table_schema(self, table_code: str) -> list[FieldSchemaRecord]:
         return self.list_field_schema_items(table_code)
 
-    def search_tables(self, query: str, database_name: str | None = None, limit: int = 10) -> list[TableMatch]:
+    def search_tables(self, query: str, database_name: str | None = None, limit: int = 5) -> list[TableMatch]:
         normalized_query = query.strip().lower()
+        effective_limit = max(1, min(limit, 5))
         databases = [database_name] if database_name else self.list_databases()
         matches: list[TableMatch] = []
 
@@ -93,7 +68,7 @@ class MetadataService:
                 )
 
         matches.sort(key=lambda item: (-item.score, item.table_code))
-        return matches[:limit]
+        return matches[:effective_limit]
 
     def search_fields(
         self,
@@ -112,6 +87,14 @@ class MetadataService:
             schema_fields = self.list_field_schema_items(table.table_code)
             for field in schema_fields:
                 scored = self._score_field_match(field, normalized_query, role_hint, frequency_hint)
+                scope_scored = self._score_field_scope_match(table, normalized_query)
+                if scored is not None and scope_scored is not None:
+                    scored = (
+                        round(min(100.0, scored[0] + 2.0), 2),
+                        f"{scored[1]}; {scope_scored[1]}",
+                    )
+                elif scored is None:
+                    scored = scope_scored
                 if scored is None:
                     continue
 
@@ -207,7 +190,7 @@ class MetadataService:
         role_hint: str | None,
         frequency_hint: str | None,
     ) -> tuple[float, str] | None:
-        best_match = self._score_semantic_field_match(field, query)
+        best_match = self._score_single_field_match(field, query)
         if best_match is None:
             return None
 
@@ -245,26 +228,6 @@ class MetadataService:
 
         return round(max(0.0, min(100.0, score)), 2), "; ".join(reasons)
 
-    def _score_semantic_field_match(
-        self,
-        field: FieldSchemaRecord,
-        query: str,
-    ) -> tuple[float, str] | None:
-        best_match: tuple[float, str] | None = None
-        for search_term in self._expand_semantic_queries(query):
-            scored = self._score_single_field_match(field, search_term)
-            if scored is None:
-                continue
-
-            score, reason = scored
-            if search_term != query:
-                reason = f"{reason}; semantic alias matched"
-
-            if best_match is None or score > best_match[0]:
-                best_match = (score, reason)
-
-        return best_match
-
     def _score_single_field_match(
         self,
         field: FieldSchemaRecord,
@@ -296,26 +259,29 @@ class MetadataService:
             return None
         return round(60.0 + ratio * 30.0, 2), "similar to query text"
 
-    def _expand_semantic_queries(self, query: str) -> list[str]:
-        normalized_query = query.strip().lower()
-        expanded: list[str] = []
-        seen: set[str] = set()
+    def _score_field_scope_match(self, table: CatalogRecord, query: str) -> tuple[float, str] | None:
+        table_code = table.table_code.lower()
+        table_name = table.table_name.lower()
+        database_name = table.database_name.lower()
 
-        def add_term(value: str) -> None:
-            cleaned = value.strip().lower()
-            if not cleaned or cleaned in seen:
-                return
-            seen.add(cleaned)
-            expanded.append(cleaned)
+        if query == table_code:
+            return 85.0, "exact table code match"
+        if query == table_name:
+            return 83.0, "exact table name match"
+        if query == database_name:
+            return 80.0, "exact database name match"
+        if query in table_code:
+            return 78.0, "table code contains query"
+        if query in table_name:
+            return 76.0, "table name contains query"
+        if query in database_name:
+            return 74.0, "database name contains query"
 
-        add_term(normalized_query)
-
-        for source, aliases in _SEMANTIC_QUERY_ALIASES.items():
-            normalized_source = source.strip().lower()
-            alias_pool = (normalized_source, *aliases)
-            if not any(term in normalized_query for term in alias_pool):
-                continue
-            for term in alias_pool:
-                add_term(term)
-
-        return expanded
+        ratio = max(
+            SequenceMatcher(None, query, table_code).ratio(),
+            SequenceMatcher(None, query, table_name).ratio(),
+            SequenceMatcher(None, query, database_name).ratio(),
+        )
+        if ratio < 0.35:
+            return None
+        return round(58.0 + ratio * 24.0, 2), "similar to table scope text"

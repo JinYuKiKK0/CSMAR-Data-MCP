@@ -13,10 +13,10 @@ Lean MCP server for CSMAR metadata discovery, probe validation, and local materi
    Deterministically enumerate tables under a purchased database.
 
 3. `csmar_search_tables`
-   Discover candidate tables by business topic, table name, or table code.
+  Discover candidate tables by business topic, table name, or table code (hard cap: 5 candidates).
 
 4. `csmar_search_fields`
-   Discover candidate fields semantically, optionally scoped by database and table.
+  Discover candidate fields by deterministic literal/similarity matching, optionally scoped by database and table.
 
 5. `csmar_get_table_schema`
    Return pure table schema with field metadata. No preview rows.
@@ -37,9 +37,10 @@ Lean MCP server for CSMAR metadata discovery, probe validation, and local materi
 
 - Single responsibility per tool.
 - Lean JSON outputs: return only fields needed for next step.
-- Repair-oriented errors: `code`, `message`, `hint`, plus optional `retry_after_seconds`, `candidate_values`, `suggested_args_patch`.
+- Repair-oriented errors: `code`, `message`, `hint`, plus optional `retry_after_seconds`, `suggested_args_patch`.
 - Date ranges are validated for format and ordering only, then passed through to SDK.
 - Query probe and materialization are linked by `validation_id`.
+- Runtime state is persisted in SQLite under `WORKSPACE_DIR/.stata_agent/csmar_mcp/`.
 
 ## Tool Examples
 
@@ -70,7 +71,7 @@ Lean MCP server for CSMAR metadata discovery, probe validation, and local materi
 
 ```json
 {
-  "query": "net profit",
+  "query": "净利润",
   "database_name": "财务报表",
   "role_hint": "outcome",
   "frequency_hint": "annual",
@@ -115,6 +116,7 @@ Lean MCP server for CSMAR metadata discovery, probe validation, and local materi
 - `poll_interval_seconds = 3`
 - `poll_timeout_seconds = 900`
 - `cache_ttl_minutes = 30`
+- `state_dir = WORKSPACE_DIR/.stata_agent/csmar_mcp/`
 
 ## Environment
 
@@ -154,5 +156,6 @@ uv run csmar-mcp --account YOUR_ACCOUNT --password YOUR_PASSWORD
 
 - The server logs in automatically and retries once when authentication expires.
 - Probe and materialization flows reuse cache when possible to mitigate upstream rate limits.
+- Tool calls are audit-logged to local SQLite, including request payload, result summary, and upstream error metadata.
 - Invalid `database_name` or `table_code` returns repair-oriented errors with actionable suggestions.
 - Tool responses avoid returning complete datasets.

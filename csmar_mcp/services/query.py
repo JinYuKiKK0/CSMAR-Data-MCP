@@ -16,12 +16,12 @@ from ..core.types import (
     ValidationRecord,
 )
 from ..infra.csmar_gateway import CsmarGateway
-from ..infra.state import InMemoryState
+from ..infra.state import PersistentState
 from .metadata import MetadataService
 
 
 class QueryService:
-    def __init__(self, gateway: CsmarGateway, metadata_service: MetadataService, state: InMemoryState) -> None:
+    def __init__(self, gateway: CsmarGateway, metadata_service: MetadataService, state: PersistentState) -> None:
         self._gateway = gateway
         self._metadata_service = metadata_service
         self._state = state
@@ -64,6 +64,10 @@ class QueryService:
             end_date=end_date,
         )
         return hashlib.sha1(cache_key.encode("utf-8")).hexdigest()[:16]
+
+    def build_materialize_cache_key(self, *, query_fingerprint: str, output_dir: str) -> str:
+        resolved_output_dir = Path(output_dir).expanduser().resolve()
+        return f"{query_fingerprint}|{resolved_output_dir}"
 
     def get_cached_probe(self, cache_key: str) -> ProbeResult | None:
         return self._state.get_cached("probes", cache_key)
@@ -214,7 +218,10 @@ class QueryService:
             )
 
         resolved_output_dir = Path(output_dir).expanduser().resolve()
-        materialize_cache_key = f"{record.query_fingerprint}|{resolved_output_dir}"
+        materialize_cache_key = self.build_materialize_cache_key(
+            query_fingerprint=record.query_fingerprint,
+            output_dir=str(resolved_output_dir),
+        )
         cached = self._state.get_cached("downloads", materialize_cache_key)
         if cached is not None and self._materialization_exists(cached):
             return cached
@@ -275,6 +282,19 @@ class QueryService:
     def _set_probe_result(self, cache_key: str, result: ProbeResult, record: ValidationRecord) -> None:
         self._state.set_cached("probes", cache_key, result)
         self._state.set_cached("validations", result.validation_id, record)
+        self._state.set_cached(
+            "query_specs",
+            result.query_fingerprint,
+            {
+                "table_code": record.table_code,
+                "columns": list(record.columns),
+                "condition": record.condition,
+                "start_date": record.start_date,
+                "end_date": record.end_date,
+                "row_count": record.row_count,
+                "can_materialize": record.can_materialize,
+            },
+        )
 
     def _materialize_query_once(
         self,
