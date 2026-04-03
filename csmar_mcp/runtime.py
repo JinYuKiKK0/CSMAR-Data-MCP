@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import os
 from dataclasses import dataclass
 from functools import lru_cache
+from pathlib import Path
 from typing import Sequence
 
 from .client import CsmarClient
@@ -12,6 +14,7 @@ from .client import CsmarClient
 class RuntimeSettings:
     account: str
     password: str
+    state_dir: Path | None = None
 
 
 DEFAULT_LANG = "0"
@@ -40,7 +43,9 @@ def build_argument_parser() -> argparse.ArgumentParser:
 def parse_runtime_settings(argv: Sequence[str] | None = None) -> RuntimeSettings:
     parser = build_argument_parser()
     args = parser.parse_args(argv)
-    return RuntimeSettings(account=args.account, password=args.password)
+    raw_state_dir = os.getenv("CSMAR_MCP_STATE_DIR", "").strip()
+    state_dir = Path(raw_state_dir).expanduser().resolve() if raw_state_dir else None
+    return RuntimeSettings(account=args.account, password=args.password, state_dir=state_dir)
 
 
 def configure_runtime(settings: RuntimeSettings) -> None:
@@ -71,4 +76,5 @@ def get_client() -> CsmarClient:
         poll_interval_seconds=DEFAULT_POLL_INTERVAL_SECONDS,
         poll_timeout_seconds=DEFAULT_POLL_TIMEOUT_SECONDS,
         cache_ttl_minutes=DEFAULT_CACHE_TTL_MINUTES,
+        state_dir=settings.state_dir,
     )
