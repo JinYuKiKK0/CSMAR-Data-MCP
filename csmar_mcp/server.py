@@ -90,6 +90,32 @@ def _safe_log_trace(
         return
 
 
+def _audit_unexpected_tool_error(
+    tool_name: str,
+    request_payload: dict[str, object],
+    error: Exception,
+) -> None:
+    try:
+        client = _client()
+    except Exception:
+        return
+
+    now = _now_utc()
+    _safe_log_trace(
+        client,
+        tool_name=tool_name,
+        request_payload=request_payload,
+        started_at=now,
+        result_summary=None,
+        cached=False,
+        error_payload={
+            "code": "upstream_error",
+            "message": str(error) or f"Unhandled internal error in {tool_name}.",
+            "hint": "Retry the same tool once. If it still fails, inspect MCP server logs.",
+        },
+    )
+
+
 @mcp.tool(
     name="csmar_list_databases",
     description="List all purchased databases.",
@@ -101,7 +127,7 @@ def _safe_log_trace(
         openWorldHint=True,
     ),
 )
-@tool_error_boundary("csmar_list_databases")
+@tool_error_boundary("csmar_list_databases", on_unexpected_error=_audit_unexpected_tool_error)
 def csmar_list_databases() -> CallToolResult:
     client = _client()
     started_at = _now_utc()
@@ -144,7 +170,7 @@ def csmar_list_databases() -> CallToolResult:
         openWorldHint=True,
     ),
 )
-@tool_error_boundary("csmar_list_tables")
+@tool_error_boundary("csmar_list_tables", on_unexpected_error=_audit_unexpected_tool_error)
 def csmar_list_tables(database_name: str) -> CallToolResult:
     started_at = _now_utc()
     request_payload: dict[str, object] = {"database_name": database_name}
@@ -211,7 +237,7 @@ def csmar_list_tables(database_name: str) -> CallToolResult:
         openWorldHint=True,
     ),
 )
-@tool_error_boundary("csmar_search_tables")
+@tool_error_boundary("csmar_search_tables", on_unexpected_error=_audit_unexpected_tool_error)
 def csmar_search_tables(query: str, database_name: str | None = None, limit: int = 5) -> CallToolResult:
     started_at = _now_utc()
     request_payload: dict[str, object] = {"query": query, "database_name": database_name, "limit": limit}
@@ -281,7 +307,7 @@ def csmar_search_tables(query: str, database_name: str | None = None, limit: int
         openWorldHint=True,
     ),
 )
-@tool_error_boundary("csmar_search_fields")
+@tool_error_boundary("csmar_search_fields", on_unexpected_error=_audit_unexpected_tool_error)
 def csmar_search_fields(
     query: str,
     database_name: str | None = None,
@@ -381,7 +407,7 @@ def csmar_search_fields(
         openWorldHint=True,
     ),
 )
-@tool_error_boundary("csmar_get_table_schema")
+@tool_error_boundary("csmar_get_table_schema", on_unexpected_error=_audit_unexpected_tool_error)
 def csmar_get_table_schema(table_code: str) -> CallToolResult:
     started_at = _now_utc()
     request_payload: dict[str, object] = {"table_code": table_code}
@@ -445,7 +471,7 @@ def csmar_get_table_schema(table_code: str) -> CallToolResult:
         openWorldHint=True,
     ),
 )
-@tool_error_boundary("csmar_probe_query")
+@tool_error_boundary("csmar_probe_query", on_unexpected_error=_audit_unexpected_tool_error)
 def csmar_probe_query(
     table_code: str,
     columns: list[str],
@@ -567,7 +593,7 @@ def csmar_probe_query(
         openWorldHint=True,
     ),
 )
-@tool_error_boundary("csmar_materialize_query")
+@tool_error_boundary("csmar_materialize_query", on_unexpected_error=_audit_unexpected_tool_error)
 def csmar_materialize_query(validation_id: str, output_dir: str) -> CallToolResult:
     started_at = _now_utc()
     request_payload: dict[str, object] = {

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from inspect import signature
 from functools import wraps
 from typing import Any, Callable
 
@@ -47,13 +48,46 @@ def internal_tool_error(tool_name: str) -> ToolError:
     )
 
 
-def tool_error_boundary(tool_name: str) -> Callable[[Callable[..., CallToolResult]], Callable[..., CallToolResult]]:
+def _build_request_payload(
+    func: Callable[..., CallToolResult],
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+) -> dict[str, Any]:
+    try:
+        bound = signature(func).bind_partial(*args, **kwargs)
+        return {
+            key: value
+            for key, value in bound.arguments.items()
+            if value is not None
+        }
+    except Exception:
+        payload: dict[str, Any] = {
+            f"arg_{index}": value
+            for index, value in enumerate(args)
+            if value is not None
+        }
+        for key, value in kwargs.items():
+            if value is not None:
+                payload[key] = value
+        return payload
+
+
+def tool_error_boundary(
+    tool_name: str,
+    on_unexpected_error: Callable[[str, dict[str, Any], Exception], None] | None = None,
+) -> Callable[[Callable[..., CallToolResult]], Callable[..., CallToolResult]]:
     def decorator(func: Callable[..., CallToolResult]) -> Callable[..., CallToolResult]:
         @wraps(func)
         def wrapped(*args: Any, **kwargs: Any) -> CallToolResult:
             try:
                 return func(*args, **kwargs)
-            except Exception:
+            except Exception as error:
+                if on_unexpected_error is not None:
+                    request_payload = _build_request_payload(func, args, kwargs)
+                    try:
+                        on_unexpected_error(tool_name, request_payload, error)
+                    except Exception:
+                        pass
                 return failure(internal_tool_error(tool_name))
 
         return wrapped

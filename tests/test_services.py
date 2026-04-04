@@ -5,7 +5,7 @@ import unittest
 from datetime import datetime, timezone
 
 from csmar_mcp.core.errors import CsmarError
-from csmar_mcp.core.types import CatalogRecord, FieldSchemaRecord, ProbeSpec
+from csmar_mcp.core.types import CatalogRecord, FieldSchemaRecord, ProbeSpec, ValidationRecord
 from csmar_mcp.infra.state import PersistentState
 from csmar_mcp.services.metadata import MetadataService
 from csmar_mcp.services.query import QueryService
@@ -87,6 +87,25 @@ class FakeGateway:
         return [{"Stkcd": "000001"}]
 
 
+class FailingMaterializeGateway(FakeGateway):
+    def __init__(self, *, error_code: str) -> None:
+        super().__init__()
+        self.error_code = error_code
+        self.start_package_calls = 0
+
+    def start_package(
+        self,
+        *,
+        table_code: str,
+        columns: list[str],
+        condition: str | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+    ) -> str:
+        self.start_package_calls += 1
+        raise CsmarError(self.error_code, f"materialize {self.error_code}")
+
+
 class MetadataServiceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -153,6 +172,63 @@ class QueryServiceTests(unittest.TestCase):
         self.assertIsNotNone(error)
         self.assertEqual(error.error_code, "invalid_condition")
         self.assertEqual(error.suggested_args_patch, {"condition": "Stkcd='000001'"})
+
+    def test_materialize_query_checks_cooldown_before_start_package(self) -> None:
+        failing_gateway = FailingMaterializeGateway(error_code="upstream_error")
+        metadata = MetadataService(failing_gateway, self.state)
+        service = QueryService(failing_gateway, metadata, self.state)
+        validation_id = "validation_cooldown"
+        query_fingerprint = "fp_cooldown"
+        self.state.set_cached(
+            "validations",
+            validation_id,
+            ValidationRecord(
+                validation_id=validation_id,
+                query_fingerprint=query_fingerprint,
+                table_code="FS_Combas",
+                columns=("Stkcd",),
+                condition="1=1",
+                start_date="2018-01-01",
+                end_date="2020-12-31",
+                row_count=12,
+                can_materialize=True,
+            ),
+        )
+        self.state.mark_rate_limited(query_fingerprint)
+
+        with self.assertRaises(CsmarError) as context:
+            service.materialize_query(validation_id, "D:/tmp/csmar", max_retries=0)
+
+        self.assertEqual(context.exception.error_code, "rate_limited")
+        self.assertIsNotNone(context.exception.retry_after_seconds)
+        self.assertEqual(failing_gateway.start_package_calls, 0)
+
+    def test_materialize_query_rate_limited_fails_fast_without_retries(self) -> None:
+        failing_gateway = FailingMaterializeGateway(error_code="rate_limited")
+        metadata = MetadataService(failing_gateway, self.state)
+        service = QueryService(failing_gateway, metadata, self.state)
+        validation_id = "validation_rate_limited"
+        self.state.set_cached(
+            "validations",
+            validation_id,
+            ValidationRecord(
+                validation_id=validation_id,
+                query_fingerprint="fp_rate_limited",
+                table_code="FS_Combas",
+                columns=("Stkcd",),
+                condition="1=1",
+                start_date="2018-01-01",
+                end_date="2020-12-31",
+                row_count=12,
+                can_materialize=True,
+            ),
+        )
+
+        with self.assertRaises(CsmarError) as context:
+            service.materialize_query(validation_id, "D:/tmp/csmar", max_retries=2)
+
+        self.assertEqual(context.exception.error_code, "rate_limited")
+        self.assertEqual(failing_gateway.start_package_calls, 1)
 
 
 class PersistentStateTests(unittest.TestCase):

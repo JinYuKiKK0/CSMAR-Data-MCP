@@ -222,6 +222,21 @@ class QueryService:
             query_fingerprint=record.query_fingerprint,
             output_dir=str(resolved_output_dir),
         )
+
+        remaining_seconds = self._state.get_rate_limit_remaining_seconds(record.query_fingerprint)
+        if remaining_seconds is not None:
+            cached = self._state.get_cached("downloads", materialize_cache_key)
+            if cached is not None and self._materialization_exists(cached):
+                return cached
+            if cached is not None:
+                self._state.delete_cached("downloads", materialize_cache_key)
+            raise CsmarError(
+                "rate_limited",
+                "CSMAR is cooling down the same query.",
+                hint="Retry after the cooldown expires or change the condition or date range.",
+                retry_after_seconds=remaining_seconds,
+            )
+
         cached = self._state.get_cached("downloads", materialize_cache_key)
         if cached is not None and self._materialization_exists(cached):
             return cached
@@ -238,6 +253,8 @@ class QueryService:
                 if error.error_code == "rate_limited":
                     self._state.mark_rate_limited(record.query_fingerprint)
                     error.retry_after_seconds = self._state.get_rate_limit_remaining_seconds(record.query_fingerprint)
+                    last_error = error
+                    break
                 last_error = error
                 if attempt >= max_retries:
                     break
