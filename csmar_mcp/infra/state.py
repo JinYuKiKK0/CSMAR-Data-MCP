@@ -258,5 +258,3 @@ class PersistentState:
             return None
         return json.loads(value)
 
-
-InMemoryState = PersistentState

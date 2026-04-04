@@ -1,4 +1,4 @@
 from .csmar_gateway import CsmarGateway
-from .state import InMemoryState, PersistentState
+from .state import PersistentState
 
-__all__ = ["CsmarGateway", "PersistentState", "InMemoryState"]
+__all__ = ["CsmarGateway", "PersistentState"]

@@ -36,7 +36,7 @@ class QueryService:
         end_date: str | None,
     ) -> str:
         normalized_condition = self._normalize_condition(condition)
-        normalized_columns = ",".join(columns)
+        normalized_columns = ",".join(self._normalize_columns(columns))
         return "|".join(
             [
                 table_code.strip(),
@@ -222,8 +222,15 @@ class QueryService:
             query_fingerprint=record.query_fingerprint,
             output_dir=str(resolved_output_dir),
         )
+        query_cache_key = self.build_cache_key(
+            table_code=record.table_code,
+            columns=record.columns,
+            condition=record.condition,
+            start_date=record.start_date,
+            end_date=record.end_date,
+        )
 
-        remaining_seconds = self._state.get_rate_limit_remaining_seconds(record.query_fingerprint)
+        remaining_seconds = self._state.get_rate_limit_remaining_seconds(query_cache_key)
         if remaining_seconds is not None:
             cached = self._state.get_cached("downloads", materialize_cache_key)
             if cached is not None and self._materialization_exists(cached):
@@ -251,8 +258,10 @@ class QueryService:
                 return output
             except CsmarError as error:
                 if error.error_code == "rate_limited":
-                    self._state.mark_rate_limited(record.query_fingerprint)
-                    error.retry_after_seconds = self._state.get_rate_limit_remaining_seconds(record.query_fingerprint)
+                    self._state.mark_rate_limited(query_cache_key)
+                    error.retry_after_seconds = self._state.get_rate_limit_remaining_seconds(
+                        query_cache_key
+                    )
                     last_error = error
                     break
                 last_error = error
@@ -299,19 +308,6 @@ class QueryService:
     def _set_probe_result(self, cache_key: str, result: ProbeResult, record: ValidationRecord) -> None:
         self._state.set_cached("probes", cache_key, result)
         self._state.set_cached("validations", result.validation_id, record)
-        self._state.set_cached(
-            "query_specs",
-            result.query_fingerprint,
-            {
-                "table_code": record.table_code,
-                "columns": list(record.columns),
-                "condition": record.condition,
-                "start_date": record.start_date,
-                "end_date": record.end_date,
-                "row_count": record.row_count,
-                "can_materialize": record.can_materialize,
-            },
-        )
 
     def _materialize_query_once(
         self,
@@ -373,6 +369,10 @@ class QueryService:
     def _normalize_condition(self, condition: str | None) -> str:
         normalized = (condition or "").strip()
         return normalized if normalized else "1=1"
+
+    def _normalize_columns(self, columns: list[str] | tuple[str, ...]) -> tuple[str, ...]:
+        cleaned = {column.strip() for column in columns if column.strip()}
+        return tuple(sorted(cleaned))
 
     def _generate_validation_id(self) -> str:
         return f"validation_{uuid4().hex[:10]}"

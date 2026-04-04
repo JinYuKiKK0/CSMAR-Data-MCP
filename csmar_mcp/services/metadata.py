@@ -93,8 +93,6 @@ class MetadataService:
                         round(min(100.0, scored[0] + 2.0), 2),
                         f"{scored[1]}; {scope_scored[1]}",
                     )
-                elif scored is None:
-                    scored = scope_scored
                 if scored is None:
                     continue
 

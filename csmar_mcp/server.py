@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import logging
 from typing import Sequence
 
 from mcp.server.fastmcp import FastMCP
@@ -37,6 +38,9 @@ mcp = FastMCP(
     ),
     json_response=True,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 def _client() -> CsmarClient:
@@ -86,8 +90,8 @@ def _safe_log_trace(
             upstream_code=upstream_code,
             raw_message=raw_message,
         )
-    except Exception:
-        return
+    except Exception as error:
+        logger.warning("Tool trace logging failed for %s: %s", tool_name, error)
 
 
 def _audit_unexpected_tool_error(
@@ -97,7 +101,8 @@ def _audit_unexpected_tool_error(
 ) -> None:
     try:
         client = _client()
-    except Exception:
+    except Exception as error:
+        logger.warning("Unable to initialize client for audit trace in %s: %s", tool_name, error)
         return
 
     now = _now_utc()
@@ -112,6 +117,32 @@ def _audit_unexpected_tool_error(
             "code": "upstream_error",
             "message": str(error) or f"Unhandled internal error in {tool_name}.",
             "hint": "Retry the same tool once. If it still fails, inspect MCP server logs.",
+        },
+    )
+
+
+def _log_invalid_arguments_trace(
+    *,
+    tool_name: str,
+    request_payload: dict[str, object],
+    started_at: datetime,
+) -> None:
+    try:
+        client = _client()
+    except Exception as error:
+        logger.warning("Unable to initialize client for invalid-arguments trace in %s: %s", tool_name, error)
+        return
+
+    _safe_log_trace(
+        client,
+        tool_name=tool_name,
+        request_payload=request_payload,
+        started_at=started_at,
+        result_summary=None,
+        cached=False,
+        error_payload={
+            "code": "invalid_arguments",
+            "message": "The tool arguments are invalid.",
         },
     )
 
@@ -177,21 +208,11 @@ def csmar_list_tables(database_name: str) -> CallToolResult:
     try:
         params = ListTablesInput.model_validate({"database_name": database_name})
     except ValidationError as error:
-        try:
-            _safe_log_trace(
-                _client(),
-                tool_name="csmar_list_tables",
-                request_payload=request_payload,
-                started_at=started_at,
-                result_summary=None,
-                cached=False,
-                error_payload={
-                    "code": "invalid_arguments",
-                    "message": "The tool arguments are invalid.",
-                },
-            )
-        except Exception:
-            pass
+        _log_invalid_arguments_trace(
+            tool_name="csmar_list_tables",
+            request_payload=request_payload,
+            started_at=started_at,
+        )
         return invalid_arguments(error)
 
     client = _client()
@@ -246,21 +267,11 @@ def csmar_search_tables(query: str, database_name: str | None = None, limit: int
             {"query": query, "database_name": database_name, "limit": limit}
         )
     except ValidationError as error:
-        try:
-            _safe_log_trace(
-                _client(),
-                tool_name="csmar_search_tables",
-                request_payload=request_payload,
-                started_at=started_at,
-                result_summary=None,
-                cached=False,
-                error_payload={
-                    "code": "invalid_arguments",
-                    "message": "The tool arguments are invalid.",
-                },
-            )
-        except Exception:
-            pass
+        _log_invalid_arguments_trace(
+            tool_name="csmar_search_tables",
+            request_payload=request_payload,
+            started_at=started_at,
+        )
         return invalid_arguments(error)
 
     client = _client()
@@ -337,21 +348,11 @@ def csmar_search_fields(
             }
         )
     except ValidationError as error:
-        try:
-            _safe_log_trace(
-                _client(),
-                tool_name="csmar_search_fields",
-                request_payload=request_payload,
-                started_at=started_at,
-                result_summary=None,
-                cached=False,
-                error_payload={
-                    "code": "invalid_arguments",
-                    "message": "The tool arguments are invalid.",
-                },
-            )
-        except Exception:
-            pass
+        _log_invalid_arguments_trace(
+            tool_name="csmar_search_fields",
+            request_payload=request_payload,
+            started_at=started_at,
+        )
         return invalid_arguments(error)
 
     client = _client()
@@ -414,21 +415,11 @@ def csmar_get_table_schema(table_code: str) -> CallToolResult:
     try:
         params = GetTableSchemaInput.model_validate({"table_code": table_code})
     except ValidationError as error:
-        try:
-            _safe_log_trace(
-                _client(),
-                tool_name="csmar_get_table_schema",
-                request_payload=request_payload,
-                started_at=started_at,
-                result_summary=None,
-                cached=False,
-                error_payload={
-                    "code": "invalid_arguments",
-                    "message": "The tool arguments are invalid.",
-                },
-            )
-        except Exception:
-            pass
+        _log_invalid_arguments_trace(
+            tool_name="csmar_get_table_schema",
+            request_payload=request_payload,
+            started_at=started_at,
+        )
         return invalid_arguments(error)
 
     client = _client()
@@ -501,21 +492,11 @@ def csmar_probe_query(
             }
         )
     except ValidationError as error:
-        try:
-            _safe_log_trace(
-                _client(),
-                tool_name="csmar_probe_query",
-                request_payload=request_payload,
-                started_at=started_at,
-                result_summary=None,
-                cached=False,
-                error_payload={
-                    "code": "invalid_arguments",
-                    "message": "The tool arguments are invalid.",
-                },
-            )
-        except Exception:
-            pass
+        _log_invalid_arguments_trace(
+            tool_name="csmar_probe_query",
+            request_payload=request_payload,
+            started_at=started_at,
+        )
         return invalid_arguments(error)
 
     client = _client()
@@ -608,21 +589,11 @@ def csmar_materialize_query(validation_id: str, output_dir: str) -> CallToolResu
             }
         )
     except ValidationError as error:
-        try:
-            _safe_log_trace(
-                _client(),
-                tool_name="csmar_materialize_query",
-                request_payload=request_payload,
-                started_at=started_at,
-                result_summary=None,
-                cached=False,
-                error_payload={
-                    "code": "invalid_arguments",
-                    "message": "The tool arguments are invalid.",
-                },
-            )
-        except Exception:
-            pass
+        _log_invalid_arguments_trace(
+            tool_name="csmar_materialize_query",
+            request_payload=request_payload,
+            started_at=started_at,
+        )
         return invalid_arguments(error)
 
     client = _client()

@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from csmar_mcp import infra
 from csmar_mcp.runtime import RuntimeSettings
 from csmar_mcp.runtime import configure_runtime
 from csmar_mcp.runtime import get_client
@@ -45,6 +46,9 @@ class RuntimeSettingsTests(unittest.TestCase):
 
         _, kwargs = mock_client.call_args
         self.assertEqual(kwargs["state_dir"], Path("/tmp/csmar-state"))
+
+    def test_inmemory_state_alias_is_not_exported(self) -> None:
+        self.assertNotIn("InMemoryState", infra.__all__)
 
 
 if __name__ == "__main__":

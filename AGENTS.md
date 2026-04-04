@@ -22,7 +22,7 @@
 - [csmar_mcp/models.py](csmar_mcp/models.py)：对外 MCP 请求/响应/错误模型与输入约束（日期格式、样本行数上限）。
 - [csmar_mcp/core/](csmar_mcp/core/)：内部核心类型与统一错误对象；不依赖 MCP transport。
 - [csmar_mcp/services/](csmar_mcp/services/)：应用服务层。`metadata.py` 负责目录/schema/搜索，`query.py` 负责 probe/materialize、缓存 key 与本地查询规则。
-- [csmar_mcp/infra/](csmar_mcp/infra/)：基础设施层。`csmar_gateway.py` 负责上游 SDK 访问、登录/重登与响应归一化，`state.py` 负责进程内缓存、validation registry 与限流冷却状态。
+- [csmar_mcp/infra/](csmar_mcp/infra/)：基础设施层。`csmar_gateway.py` 负责上游 SDK 访问、登录/重登与响应归一化，`state.py` 负责 SQLite 持久化缓存、validation registry 与限流冷却状态。
 - [csmarapi/](csmarapi/)：上游 SDK 兼容层，视为遗留边界；仅允许通过 [csmar_mcp/infra/csmar_gateway.py](csmar_mcp/infra/csmar_gateway.py) 访问，不在 tools 或 services 层直接散落调用。
 
 ## Build and Test
@@ -30,7 +30,8 @@
 - 开发依赖安装：uv sync
 - 本地运行：uv run csmar-mcp --account YOUR_ACCOUNT --password YOUR_PASSWORD
 - 生产/全局 MCP 配置优先：python -m csmar_mcp --account YOUR_ACCOUNT --password YOUR_PASSWORD
-- 当前仓库未提供项目级自动化测试目录；修改后至少执行一次启动级冒烟验证。
+- 回归测试入口：`uv run python -m unittest discover -s tests -p "test_*.py" -v`
+- 修改后至少执行一次启动级冒烟验证。
 
 ## Conventions
 
@@ -47,11 +48,11 @@
 - 查询日期范围不做硬编码限制；仅校验 `YYYY-MM-DD` 格式与起止顺序，然后原样透传给 SDK。
 - 预览/样本行数保持小上限，以节省上下文。
 - 遇到上游限流时优先复用缓存并返回标准化 error_code，避免重复打上游。
-- 错误码约定与 PLAN.md 保持一致：auth_failed、not_purchased、table_not_found、field_not_found、invalid_condition、rate_limited、daily_limit_exceeded、download_failed、unzip_failed、upstream_error、invalid_arguments。
+- 错误码约定：auth_failed、not_purchased、table_not_found、field_not_found、invalid_condition、rate_limited、daily_limit_exceeded、download_failed、unzip_failed、upstream_error、invalid_arguments。
 
 ## 文档导航
 
 - 详细启动、配置与调试：[README.md](README.md)
-- 设计决策与鲁棒性规则：[PLAN.md](PLAN.md)
+- 常见问题与调试记录：[notes/](notes/)
 - 上游 Python SDK 背景：[CSMAR_PYTHON.md](CSMAR_PYTHON.md)
 - MCP 客户端配置示例：[mcp.agent.config.example.json](mcp.agent.config.example.json)

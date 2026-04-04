@@ -130,9 +130,14 @@ class MetadataServiceTests(unittest.TestCase):
         results = self.service.search_fields("return on assets", table_code="BANK_Index")
         self.assertEqual(results, [])
 
-    def test_search_fields_supports_table_scope_matching(self) -> None:
-        results = self.service.search_fields("BANK_Index")
-        self.assertTrue(any(item.table_code == "BANK_Index" for item in results))
+    def test_search_fields_requires_real_field_match(self) -> None:
+        results = self.service.search_fields("BANK_Index", table_code="BANK_Index")
+        self.assertEqual(results, [])
+
+    def test_search_fields_with_scope_still_returns_field_hits(self) -> None:
+        results = self.service.search_fields("ROAA", table_code="BANK_Index")
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].field_name, "ROAA")
 
 
 class QueryServiceTests(unittest.TestCase):
@@ -173,6 +178,37 @@ class QueryServiceTests(unittest.TestCase):
         self.assertEqual(error.error_code, "invalid_condition")
         self.assertEqual(error.suggested_args_patch, {"condition": "Stkcd='000001'"})
 
+    def test_build_cache_key_is_order_insensitive_for_columns(self) -> None:
+        key_one = self.service.build_cache_key(
+            table_code="FS_Combas",
+            columns=("Accper", "Stkcd", "Accper"),
+            condition="Stkcd='000001'",
+            start_date="2018-01-01",
+            end_date="2020-12-31",
+        )
+        key_two = self.service.build_cache_key(
+            table_code="FS_Combas",
+            columns=("Stkcd", "Accper"),
+            condition="Stkcd='000001'",
+            start_date="2018-01-01",
+            end_date="2020-12-31",
+        )
+        self.assertEqual(key_one, key_two)
+
+    def test_probe_query_does_not_store_query_specs_namespace(self) -> None:
+        result = self.service.probe_query(
+            ProbeSpec(
+                table_code="FS_Combas",
+                columns=("Stkcd",),
+                condition="Stkcd='000001'",
+                start_date="2018-01-01",
+                end_date="2020-12-31",
+                sample_rows=0,
+            )
+        )
+
+        self.assertIsNone(self.state.get_cached("query_specs", result.query_fingerprint))
+
     def test_materialize_query_checks_cooldown_before_start_package(self) -> None:
         failing_gateway = FailingMaterializeGateway(error_code="upstream_error")
         metadata = MetadataService(failing_gateway, self.state)
@@ -194,7 +230,14 @@ class QueryServiceTests(unittest.TestCase):
                 can_materialize=True,
             ),
         )
-        self.state.mark_rate_limited(query_fingerprint)
+        query_cache_key = service.build_cache_key(
+            table_code="FS_Combas",
+            columns=("Stkcd",),
+            condition="1=1",
+            start_date="2018-01-01",
+            end_date="2020-12-31",
+        )
+        self.state.mark_rate_limited(query_cache_key)
 
         with self.assertRaises(CsmarError) as context:
             service.materialize_query(validation_id, "D:/tmp/csmar", max_retries=0)
@@ -208,12 +251,13 @@ class QueryServiceTests(unittest.TestCase):
         metadata = MetadataService(failing_gateway, self.state)
         service = QueryService(failing_gateway, metadata, self.state)
         validation_id = "validation_rate_limited"
+        query_fingerprint = "fp_rate_limited"
         self.state.set_cached(
             "validations",
             validation_id,
             ValidationRecord(
                 validation_id=validation_id,
-                query_fingerprint="fp_rate_limited",
+                query_fingerprint=query_fingerprint,
                 table_code="FS_Combas",
                 columns=("Stkcd",),
                 condition="1=1",
@@ -229,6 +273,14 @@ class QueryServiceTests(unittest.TestCase):
 
         self.assertEqual(context.exception.error_code, "rate_limited")
         self.assertEqual(failing_gateway.start_package_calls, 1)
+        query_cache_key = service.build_cache_key(
+            table_code="FS_Combas",
+            columns=("Stkcd",),
+            condition="1=1",
+            start_date="2018-01-01",
+            end_date="2020-12-31",
+        )
+        self.assertIsNotNone(self.state.get_rate_limit_remaining_seconds(query_cache_key))
 
 
 class PersistentStateTests(unittest.TestCase):
