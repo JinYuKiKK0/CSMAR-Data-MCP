@@ -12,19 +12,13 @@ Lean MCP server for CSMAR metadata discovery, probe validation, and local materi
 2. `csmar_list_tables`
    Deterministically enumerate tables under a purchased database.
 
-3. `csmar_search_tables`
-  Discover candidate tables by business topic, table name, or table code (hard cap: 5 candidates).
-
-4. `csmar_search_fields`
-  Discover candidate fields by deterministic literal/similarity matching, optionally scoped by database and table.
-
-5. `csmar_get_table_schema`
+3. `csmar_get_table_schema`
    Return pure table schema with field metadata. No preview rows.
 
-6. `csmar_probe_query`
+4. `csmar_probe_query`
    Probe a query and return `validation_id`, `query_fingerprint`, row count, tiny sample, invalid columns, and materialization feasibility.
 
-7. `csmar_materialize_query`
+5. `csmar_materialize_query`
    Materialize a previously probed query by `validation_id` into local files.
 
 ### Non-Goals for Public Surface
@@ -55,27 +49,6 @@ Lean MCP server for CSMAR metadata discovery, probe validation, and local materi
 ```json
 {
   "database_name": "股票市场交易"
-}
-```
-
-### `csmar_search_tables`
-
-```json
-{
-  "query": "balance sheet",
-  "limit": 5
-}
-```
-
-### `csmar_search_fields`
-
-```json
-{
-  "query": "净利润",
-  "database_name": "财务报表",
-  "role_hint": "outcome",
-  "frequency_hint": "annual",
-  "limit": 10
 }
 ```
 
@@ -120,7 +93,7 @@ Lean MCP server for CSMAR metadata discovery, probe validation, and local materi
 
 ## Environment
 
-- Python >= 3.11
+- Python >= 3.12
 - [uv](https://docs.astral.sh/uv/)
 
 ## Quick Start
