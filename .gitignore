@@ -8,3 +8,5 @@ __pycache__/
 token.txt
 downloads
 notes/
+.idea/
+.stata_agent/
