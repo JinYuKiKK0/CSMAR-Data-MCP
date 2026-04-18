@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from inspect import signature
+import contextlib
+from collections.abc import Callable
 from functools import wraps
-from typing import Any, Callable
+from inspect import signature
+from typing import Any
 
 from mcp.types import CallToolResult, TextContent
 from pydantic import ValidationError
@@ -22,7 +24,9 @@ def success(payload: dict[str, Any], summary: str) -> CallToolResult:
 
 def failure(error: ToolError) -> CallToolResult:
     payload = error.as_dict()
-    return CallToolResult(content=[text(f"[{error.code}] {error.message}")], structuredContent=payload, isError=True)
+    return CallToolResult(
+        content=[text(f"[{error.code}] {error.message}")], structuredContent=payload, isError=True
+    )
 
 
 def invalid_arguments(error: ValidationError) -> CallToolResult:
@@ -55,16 +59,10 @@ def _build_request_payload(
 ) -> dict[str, Any]:
     try:
         bound = signature(func).bind_partial(*args, **kwargs)
-        return {
-            key: value
-            for key, value in bound.arguments.items()
-            if value is not None
-        }
+        return {key: value for key, value in bound.arguments.items() if value is not None}
     except Exception:
         payload: dict[str, Any] = {
-            f"arg_{index}": value
-            for index, value in enumerate(args)
-            if value is not None
+            f"arg_{index}": value for index, value in enumerate(args) if value is not None
         }
         for key, value in kwargs.items():
             if value is not None:
@@ -84,10 +82,8 @@ def tool_error_boundary(
             except Exception as error:
                 if on_unexpected_error is not None:
                     request_payload = _build_request_payload(func, args, kwargs)
-                    try:
+                    with contextlib.suppress(Exception):
                         on_unexpected_error(tool_name, request_payload, error)
-                    except Exception:
-                        pass
                 return failure(internal_tool_error(tool_name))
 
         return wrapped
@@ -111,7 +107,7 @@ def enrich_error(
     if error.error_code == "database_not_found":
         hint = "Call csmar_list_databases, copy database_name verbatim, then retry with that value."
     elif error.error_code == "table_not_found":
-        hint = "Use csmar_search_tables to find a valid table_code, then retry."
+        hint = "Call csmar_list_tables to enumerate tables in the database, copy a valid table_code, then retry."
     elif error.error_code == "field_not_found":
         hint = "Use csmar_get_table_schema to inspect fields, then retry with valid columns."
     elif error.error_code == "invalid_condition":

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -8,7 +8,6 @@ from uuid import uuid4
 from .core.errors import CsmarError
 from .core.types import (
     CatalogRecord,
-    FieldMatch,
     FieldSchemaRecord,
     MaterializationResult,
     ProbeResult,
@@ -23,11 +22,8 @@ from .models import (
     MaterializeQueryOutput,
     ProbeQueryInput,
     ProbeQueryOutput,
-    SearchFieldItem,
-    SearchTableItem,
 )
 from .services import MetadataService, QueryService
-
 
 CsmarMcpError = CsmarError
 
@@ -45,7 +41,9 @@ class CsmarClient:
         state_dir: str | Path | None = None,
     ) -> None:
         resolved_state_dir = Path(state_dir) if state_dir is not None else self._default_state_dir()
-        self._state = PersistentState(cache_ttl_minutes=cache_ttl_minutes, state_dir=resolved_state_dir)
+        self._state = PersistentState(
+            cache_ttl_minutes=cache_ttl_minutes, state_dir=resolved_state_dir
+        )
         self._gateway = CsmarGateway(
             account=account,
             password=password,
@@ -114,44 +112,14 @@ class CsmarClient:
     def list_tables(self, database_name: str) -> list[CatalogRecord]:
         return self._metadata.list_tables(database_name)
 
-    def search_tables(self, query: str, database_name: str | None = None, limit: int = 5) -> list[SearchTableItem]:
-        return [
-            SearchTableItem(
-                table_code=item.table_code,
-                table_name=item.table_name,
-                database_name=item.database_name,
-                why_matched=item.why_matched,
-                score=item.score,
-            )
-            for item in self._metadata.search_tables(query, database_name=database_name, limit=limit)
-        ]
-
     def read_table_schema(self, table_code: str) -> GetTableSchemaOutput:
         return GetTableSchemaOutput(
             table_code=table_code,
-            fields=[self._to_field_schema_item(item) for item in self._metadata.read_table_schema(table_code)],
+            fields=[
+                self._to_field_schema_item(item)
+                for item in self._metadata.read_table_schema(table_code)
+            ],
         )
-
-    def search_fields(
-        self,
-        query: str,
-        database_name: str | None = None,
-        table_code: str | None = None,
-        role_hint: str | None = None,
-        frequency_hint: str | None = None,
-        limit: int = 20,
-    ) -> list[SearchFieldItem]:
-        return [
-            self._to_search_field_item(item)
-            for item in self._metadata.search_fields(
-                query=query,
-                database_name=database_name,
-                table_code=table_code,
-                role_hint=role_hint,
-                frequency_hint=frequency_hint,
-                limit=limit,
-            )
-        ]
 
     def build_cache_key(
         self,
@@ -235,21 +203,6 @@ class CsmarClient:
             role_tags=list(item.role_tags) if item.role_tags else None,
         )
 
-    def _to_search_field_item(self, item: FieldMatch) -> SearchFieldItem:
-        return SearchFieldItem(
-            field_name=item.field_name,
-            field_label=item.field_label,
-            field_description=item.field_description,
-            data_type=item.data_type,
-            frequency_tags=list(item.frequency_tags) if item.frequency_tags else None,
-            role_tags=list(item.role_tags) if item.role_tags else None,
-            table_code=item.table_code,
-            table_name=item.table_name,
-            database_name=item.database_name,
-            why_matched=item.why_matched,
-            score=item.score,
-        )
-
     def _to_probe_query_output(self, result: ProbeResult) -> ProbeQueryOutput:
         return ProbeQueryOutput(
             validation_id=result.validation_id,
@@ -276,4 +229,4 @@ class CsmarClient:
         )
 
     def _to_iso_timestamp(self, value: datetime) -> str:
-        return value.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        return value.astimezone(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")

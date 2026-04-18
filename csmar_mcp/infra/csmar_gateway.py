@@ -1,18 +1,22 @@
+# pyright: basic
+# This file is the exclusive boundary to the untyped CSMAR Python SDK (csmarapi).
+# Strict mode is disabled here because the SDK exposes no type information and
+# pyright cannot introspect its response shapes. All other modules remain strict.
 from __future__ import annotations
 
 import json
 import re
 import threading
-from datetime import datetime, timezone
-from typing import Any, Callable
+from collections.abc import Callable
+from datetime import UTC, datetime
+from typing import Any
 from urllib import parse
 
 import urllib3
-
 from csmarapi.CsmarService import CsmarService
 
-from ..core.errors import CsmarError
-from ..core.types import CatalogRecord, FieldSchemaRecord
+from csmar_mcp.core.errors import CsmarError
+from csmar_mcp.core.types import CatalogRecord, FieldSchemaRecord
 
 
 class CsmarGateway:
@@ -41,7 +45,9 @@ class CsmarGateway:
     def list_databases(self) -> list[str]:
         response = self._get(self._service.urlUtil.getListDbsUrl(), include_belong=True)
         return self._deduplicate(
-            self._normalize_name_list(response.get("data"), dict_name_keys=("dbName", "databaseName", "name", "value"))
+            self._normalize_name_list(
+                response.get("data"), dict_name_keys=("dbName", "databaseName", "name", "value")
+            )
         )
 
     def list_tables(self, database_name: str) -> list[CatalogRecord]:
@@ -91,7 +97,9 @@ class CsmarGateway:
             return []
 
         limited_condition = self._append_limit_clause(condition, sample_rows)
-        payload = self._build_query_payload(table_code, columns, limited_condition, start_date, end_date)
+        payload = self._build_query_payload(
+            table_code, columns, limited_condition, start_date, end_date
+        )
         response = self._post(self._service.urlUtil.getQueryUrl(), payload)
         rows = self._extract_preview_rows(response.get("data", {}))
         return rows[:sample_rows]
@@ -200,7 +208,9 @@ class CsmarGateway:
 
         return self._request_with_reauth(requester)
 
-    def _post(self, endpoint: str, payload: dict[str, Any], include_belong: bool = False) -> dict[str, Any]:
+    def _post(
+        self, endpoint: str, payload: dict[str, Any], include_belong: bool = False
+    ) -> dict[str, Any]:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
         def requester() -> dict[str, Any]:
@@ -240,7 +250,11 @@ class CsmarGateway:
 
     def _login(self) -> None:
         raw_response = self._service.logon(self._account, self._password, self._lang, self._belong)
-        response = raw_response if isinstance(raw_response, dict) else {"code": -1, "msg": "Login request failed"}
+        response = (
+            raw_response
+            if isinstance(raw_response, dict)
+            else {"code": -1, "msg": "Login request failed"}
+        )
         if response.get("code") != 0:
             raise self._to_error(response, fallback_error_code="auth_failed")
 
@@ -302,7 +316,9 @@ class CsmarGateway:
         message = str(response.get("msg", "")).lower()
         return "offline" in message or "login" in message
 
-    def _to_error(self, response: dict[str, Any], fallback_error_code: str = "upstream_error") -> CsmarError:
+    def _to_error(
+        self, response: dict[str, Any], fallback_error_code: str = "upstream_error"
+    ) -> CsmarError:
         upstream_code = response.get("code")
         raw_message = str(response.get("msg") or "Unknown upstream error from CSMAR")
         lowered_message = raw_message.lower()
@@ -313,14 +329,18 @@ class CsmarGateway:
             error_code = "daily_limit_exceeded"
         elif any(token in lowered_message for token in ("purchase", "permission", "authorized")):
             error_code = "not_purchased"
-        elif (
-            any(token in lowered_message for token in ("database", "db", "数据库"))
-            and any(token in lowered_message for token in ("not exist", "does not exist", "missing", "不存在"))
+        elif any(token in lowered_message for token in ("database", "db", "数据库")) and any(
+            token in lowered_message
+            for token in ("not exist", "does not exist", "missing", "不存在")
         ):
             error_code = "database_not_found"
-        elif "table" in lowered_message and any(token in lowered_message for token in ("not", "exist", "missing")):
+        elif "table" in lowered_message and any(
+            token in lowered_message for token in ("not", "exist", "missing")
+        ):
             error_code = "table_not_found"
-        elif "field" in lowered_message and any(token in lowered_message for token in ("not", "exist", "missing")):
+        elif "field" in lowered_message and any(
+            token in lowered_message for token in ("not", "exist", "missing")
+        ):
             error_code = "field_not_found"
         elif any(token in lowered_message for token in ("condition", "syntax", "sql")):
             error_code = "invalid_condition"
@@ -359,7 +379,7 @@ class CsmarGateway:
             "auth_failed": "Check account and password, then restart the MCP server.",
             "database_not_found": "Call csmar_list_databases and copy database_name verbatim, then retry.",
             "not_purchased": "Choose a table from a purchased database before retrying.",
-            "table_not_found": "Use csmar_search_tables to find a valid table_code, then retry.",
+            "table_not_found": "Call csmar_list_tables to enumerate tables, copy a valid table_code, then retry.",
             "field_not_found": "Use csmar_get_table_schema to inspect fields, then retry.",
             "invalid_condition": "Fix condition syntax and retry. Example: use '=' instead of '=='.",
             "rate_limited": "Retry after cooldown expires or change condition/date range.",
@@ -531,7 +551,17 @@ class CsmarGateway:
                     "chsName",
                     "itemName",
                 ),
-                token_hints=("label", "title", "caption", "cn", "ch", "zh", "display", "alias", "item"),
+                token_hints=(
+                    "label",
+                    "title",
+                    "caption",
+                    "cn",
+                    "ch",
+                    "zh",
+                    "display",
+                    "alias",
+                    "item",
+                ),
             )
             if field_label == field_name:
                 field_label = None
@@ -550,7 +580,16 @@ class CsmarGateway:
                     "indicatorMeaning",
                     "fieldMeaning",
                 ),
-                token_hints=("desc", "description", "remark", "comment", "memo", "help", "meaning", "explain"),
+                token_hints=(
+                    "desc",
+                    "description",
+                    "remark",
+                    "comment",
+                    "memo",
+                    "help",
+                    "meaning",
+                    "explain",
+                ),
             )
             data_type = self._pick_text(
                 raw_item,
@@ -560,12 +599,28 @@ class CsmarGateway:
 
             frequency_tags = self._extract_tags(
                 raw_item,
-                preferred_keys=("frequencyTags", "frequencyTag", "freqTag", "frequency", "freq", "period", "cycle"),
+                preferred_keys=(
+                    "frequencyTags",
+                    "frequencyTag",
+                    "freqTag",
+                    "frequency",
+                    "freq",
+                    "period",
+                    "cycle",
+                ),
                 token_hints=("frequency", "freq", "period", "cycle"),
             )
             role_tags = self._extract_tags(
                 raw_item,
-                preferred_keys=("roleTags", "roleTag", "role", "dimension", "measure", "metric", "identifier"),
+                preferred_keys=(
+                    "roleTags",
+                    "roleTag",
+                    "role",
+                    "dimension",
+                    "measure",
+                    "metric",
+                    "identifier",
+                ),
                 token_hints=("role", "dimension", "measure", "metric", "identifier"),
             )
 
@@ -655,7 +710,7 @@ class CsmarGateway:
             return None
 
         if isinstance(value, str):
-            raw_values = [item.strip() for item in re.split(r"[,;|/，；、]", value) if item.strip()]
+            raw_values = [item.strip() for item in re.split(r"[,;|/，；、]", value) if item.strip()]  # noqa: RUF001
         elif isinstance(value, (list, tuple, set)):
             for item in value:
                 text = self._to_text(item)
@@ -730,4 +785,4 @@ class CsmarGateway:
         return unique_values
 
     def _now(self) -> datetime:
-        return datetime.now(timezone.utc)
+        return datetime.now(UTC)

@@ -3,25 +3,27 @@ from __future__ import annotations
 import hashlib
 import time
 import zipfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
-from ..core.errors import CsmarError
-from ..core.types import (
-    MaterializeAuditRecord,
+from csmar_mcp.core.errors import CsmarError
+from csmar_mcp.core.types import (
     MaterializationResult,
+    MaterializeAuditRecord,
     ProbeResult,
     ProbeSpec,
     ValidationRecord,
 )
-from ..infra.csmar_gateway import CsmarGateway
-from ..infra.state import PersistentState
-from .metadata import MetadataService
+from csmar_mcp.infra.csmar_gateway import CsmarGateway
+from csmar_mcp.infra.state import PersistentState
+from csmar_mcp.services.metadata import MetadataService
 
 
 class QueryService:
-    def __init__(self, gateway: CsmarGateway, metadata_service: MetadataService, state: PersistentState) -> None:
+    def __init__(
+        self, gateway: CsmarGateway, metadata_service: MetadataService, state: PersistentState
+    ) -> None:
         self._gateway = gateway
         self._metadata_service = metadata_service
         self._state = state
@@ -114,8 +116,13 @@ class QueryService:
             start_date=request.start_date,
             end_date=request.end_date,
         )
-        available_fields = {item.field_name for item in self._metadata_service.list_field_schema_items(request.table_code)}
-        invalid_columns = tuple(column for column in request.columns if column not in available_fields)
+        available_fields = {
+            item.field_name
+            for item in self._metadata_service.list_field_schema_items(request.table_code)
+        }
+        invalid_columns = tuple(
+            column for column in request.columns if column not in available_fields
+        )
 
         validation_id = self._generate_validation_id()
         if invalid_columns:
@@ -289,23 +296,29 @@ class QueryService:
                 hint="Use '=' instead of '==', then retry.",
                 suggested_args_patch={"condition": normalized.replace("==", "=")},
             )
-        if any(mark in normalized for mark in ("“", "”", "‘", "’")):
+        if any(mark in normalized for mark in ("“", "”", "‘", "’")):  # noqa: RUF001
             return CsmarError(
                 "invalid_condition",
                 "The condition uses smart quotes which CSMAR does not accept.",
                 hint="Replace smart quotes with plain ASCII quotes, then retry.",
-                suggested_args_patch={"condition": normalized.translate(str.maketrans({"“": '"', "”": '"', "‘": "'", "’": "'"}))},
+                suggested_args_patch={
+                    "condition": normalized.translate(
+                        str.maketrans({"“": '"', "”": '"', "‘": "'", "’": "'"})  # noqa: RUF001
+                    )
+                },
             )
-        if "；" in normalized:
+        if "；" in normalized:  # noqa: RUF001
             return CsmarError(
                 "invalid_condition",
                 "The condition contains a full-width semicolon which CSMAR does not accept.",
                 hint="Remove the full-width semicolon and retry.",
-                suggested_args_patch={"condition": normalized.replace("；", "")},
+                suggested_args_patch={"condition": normalized.replace("；", "")},  # noqa: RUF001
             )
         return None
 
-    def _set_probe_result(self, cache_key: str, result: ProbeResult, record: ValidationRecord) -> None:
+    def _set_probe_result(
+        self, cache_key: str, result: ProbeResult, record: ValidationRecord
+    ) -> None:
         self._state.set_cached("probes", cache_key, result)
         self._state.set_cached("validations", result.validation_id, record)
 
@@ -343,7 +356,9 @@ class QueryService:
                 raw_message=str(error),
             ) from error
 
-        extracted_files = tuple(sorted(str(path.resolve()) for path in extract_dir.rglob("*") if path.is_file()))
+        extracted_files = tuple(
+            sorted(str(path.resolve()) for path in extract_dir.rglob("*") if path.is_file())
+        )
         completed_at = self._now()
 
         return MaterializationResult(
@@ -381,4 +396,4 @@ class QueryService:
         return f"download_{uuid4().hex[:10]}"
 
     def _now(self) -> datetime:
-        return datetime.now(timezone.utc)
+        return datetime.now(UTC)

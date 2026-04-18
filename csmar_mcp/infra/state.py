@@ -5,7 +5,7 @@ import json
 import pickle
 import sqlite3
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -14,7 +14,9 @@ class PersistentState:
     def __init__(self, cache_ttl_minutes: int = 30, state_dir: str | Path | None = None) -> None:
         self._lock = threading.RLock()
         self._cache_ttl = timedelta(minutes=max(1, cache_ttl_minutes))
-        base_dir = Path(state_dir) if state_dir is not None else Path.cwd() / ".stata_agent" / "csmar_mcp"
+        base_dir = (
+            Path(state_dir) if state_dir is not None else Path.cwd() / ".stata_agent" / "csmar_mcp"
+        )
         self._state_dir = base_dir.expanduser().resolve()
         self._state_dir.mkdir(parents=True, exist_ok=True)
         self._db_path = self._state_dir / "state.sqlite3"
@@ -39,7 +41,7 @@ class PersistentState:
             if row is None:
                 return None
 
-            created_at = datetime.fromtimestamp(float(row["created_at"]), tz=timezone.utc)
+            created_at = datetime.fromtimestamp(float(row["created_at"]), tz=UTC)
             if self._now() - created_at > self._cache_ttl:
                 self._conn.execute(
                     "DELETE FROM cache_entries WHERE namespace = ? AND cache_key = ?",
@@ -60,7 +62,7 @@ class PersistentState:
             if row is None:
                 return False
 
-            created_at = datetime.fromtimestamp(float(row["created_at"]), tz=timezone.utc)
+            created_at = datetime.fromtimestamp(float(row["created_at"]), tz=UTC)
             if self._now() - created_at > self._cache_ttl:
                 self._conn.execute(
                     "DELETE FROM cache_entries WHERE namespace = ? AND cache_key = ?",
@@ -178,7 +180,9 @@ class PersistentState:
 
     def get_tool_trace(self, trace_id: str) -> dict[str, Any] | None:
         with self._lock:
-            row = self._conn.execute("SELECT * FROM tool_audit_log WHERE trace_id = ?", (trace_id,)).fetchone()
+            row = self._conn.execute(
+                "SELECT * FROM tool_audit_log WHERE trace_id = ?", (trace_id,)
+            ).fetchone()
             if row is None:
                 return None
 
@@ -243,10 +247,10 @@ class PersistentState:
             self._conn.commit()
 
     def _now(self) -> datetime:
-        return datetime.now(timezone.utc)
+        return datetime.now(UTC)
 
     def _to_iso_datetime(self, value: datetime) -> str:
-        return value.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        return value.astimezone(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
     def _to_json(self, value: dict[str, Any] | None) -> str | None:
         if value is None:
@@ -257,4 +261,3 @@ class PersistentState:
         if value is None:
             return None
         return json.loads(value)
-

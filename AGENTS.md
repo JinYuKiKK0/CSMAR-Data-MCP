@@ -3,12 +3,14 @@
 ## 项目定位
 
 - 本项目是一个对接 CSMAR 数据库接口的 MCP 服务器。
-- 主要职责：目录搜索、表结构检查、查询校验、下载物化到本地。
+- 主要职责：目录确定性枚举、表结构检查、查询校验、下载物化到本地。
 - 交互式工具不返回完整数据集（完整数据通过structuredContent返回），只返回元数据、计数、小样本和本地工件清单。
+- 不提供 search 类工具：CSMAR 对同一账号的高频调用存在限流，硬遍历式搜索易触发上游冷却；由 LLM 基于 list/schema 的确定性返回自行做候选筛选。
 
 ## Code Style
 
-- 使用 Python 3.11+，新增/修改代码保持明确类型注解。
+- 使用 Python 3.12+，新增/修改代码保持明确类型注解。
+- 子包受 ruff + pyright strict 约束，`csmarapi/` 作为遗留官方 SDK 排除；通过仓库根 `scripts/check.py` 一并跑 lint。
 - 新增工具输入输出优先在 [csmar_mcp/models.py](csmar_mcp/models.py) 中定义 Pydantic 模型，默认遵循严格校验。
 - 对外参数名统一使用 snake_case；工具输入保持单一契约，不维护历史兼容包装层。
 - 成功返回保持极简；空字段不要输出；失败返回优先使用 `code`、`message`、`hint` 与最少量修复元数据。
@@ -40,15 +42,13 @@
 - 当前对外工具面：
   - `csmar_list_databases`
   - `csmar_list_tables`
-  - `csmar_search_tables`
-  - `csmar_search_fields`
   - `csmar_get_table_schema`
   - `csmar_probe_query`
   - `csmar_materialize_query`
 - 查询日期范围不做硬编码限制；仅校验 `YYYY-MM-DD` 格式与起止顺序，然后原样透传给 SDK。
 - 预览/样本行数保持小上限，以节省上下文。
 - 遇到上游限流时优先复用缓存并返回标准化 error_code，避免重复打上游。
-- 错误码约定：auth_failed、not_purchased、table_not_found、field_not_found、invalid_condition、rate_limited、daily_limit_exceeded、download_failed、unzip_failed、upstream_error、invalid_arguments。
+- 错误码约定：auth_failed、not_purchased、table_not_found、field_not_found、invalid_condition、rate_limited、daily_limit_exceeded、download_failed、unzip_failed、upstream_error、invalid_arguments。`table_not_found` 的 hint 引导调用方回到 `csmar_list_tables`，`field_not_found` 的 hint 引导调用方回到 `csmar_get_table_schema`。
 
 ## 文档导航
 

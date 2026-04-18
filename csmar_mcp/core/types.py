@@ -23,30 +23,6 @@ class FieldSchemaRecord:
 
 
 @dataclass(frozen=True, slots=True)
-class TableMatch:
-    table_code: str
-    table_name: str
-    database_name: str
-    why_matched: str
-    score: float
-
-
-@dataclass(frozen=True, slots=True)
-class FieldMatch:
-    field_name: str
-    field_label: str | None
-    field_description: str | None
-    data_type: str | None
-    frequency_tags: tuple[str, ...] | None
-    role_tags: tuple[str, ...] | None
-    table_code: str
-    table_name: str
-    database_name: str
-    why_matched: str
-    score: float
-
-
-@dataclass(frozen=True, slots=True)
 class ProbeSpec:
     table_code: str
     columns: tuple[str, ...]

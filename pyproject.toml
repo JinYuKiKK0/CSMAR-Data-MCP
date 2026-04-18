@@ -2,7 +2,7 @@
 name = "csmar-mcp"
 version = "0.1.0"
 description = "MCP server for querying CSMAR metadata and materializing downloads"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = [
     "mcp[cli]>=1.26.0",
     "pandas>=3.0.1",
@@ -20,3 +20,28 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["csmar_mcp", "csmarapi"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["csmar_mcp", "tests"]
+extend-exclude = ["csmarapi"]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP", "SIM", "N", "C4", "TID", "T20", "RUF"]
+ignore = ["E501"]
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "parents"
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.pyright]
+include = ["csmar_mcp"]
+exclude = ["csmarapi", "**/__pycache__"]
+pythonVersion = "3.12"
+typeCheckingMode = "strict"
+reportMissingTypeStubs = "warning"
+venvPath = "../.."
+venv = ".venv"

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import logging
-from typing import Sequence
+from collections.abc import Sequence
+from datetime import UTC, datetime
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult, ToolAnnotations
@@ -17,24 +17,18 @@ from .models import (
     ListTablesOutput,
     MaterializeQueryInput,
     ProbeQueryInput,
-    SearchFieldsInput,
-    SearchFieldsOutput,
-    SearchTablesInput,
-    SearchTablesOutput,
     TableListItem,
 )
 from .presenters import enrich_error, failure, invalid_arguments, success, tool_error_boundary
 from .runtime import configure_runtime, get_client, parse_runtime_settings
 
-
 mcp = FastMCP(
     name="csmar_mcp",
     instructions=(
         "CSMAR MCP for StataAgent workflows. Use csmar_list_databases and csmar_list_tables for deterministic "
-        "enumeration, csmar_search_tables (max 5 candidates) to narrow scope, csmar_get_table_schema for precise "
-        "schema inspection, csmar_search_fields only as deterministic field lookup, csmar_probe_query for "
-        "feasibility validation, and csmar_materialize_query only after "
-        "probe success. Tools return concise structured JSON and repair hints on failure."
+        "enumeration, csmar_get_table_schema for precise schema inspection, csmar_probe_query for feasibility "
+        "validation, and csmar_materialize_query only after probe success. Tools return concise structured JSON "
+        "and repair hints on failure."
     ),
     json_response=True,
 )
@@ -48,7 +42,7 @@ def _client() -> CsmarClient:
 
 
 def _now_utc() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _safe_log_trace(
@@ -90,8 +84,8 @@ def _safe_log_trace(
             upstream_code=upstream_code,
             raw_message=raw_message,
         )
-    except Exception as error:
-        logger.warning("Tool trace logging failed for %s: %s", tool_name, error)
+    except Exception as trace_error:
+        logger.warning("Tool trace logging failed for %s: %s", tool_name, trace_error)
 
 
 def _audit_unexpected_tool_error(
@@ -130,7 +124,9 @@ def _log_invalid_arguments_trace(
     try:
         client = _client()
     except Exception as error:
-        logger.warning("Unable to initialize client for invalid-arguments trace in %s: %s", tool_name, error)
+        logger.warning(
+            "Unable to initialize client for invalid-arguments trace in %s: %s", tool_name, error
+        )
         return
 
     _safe_log_trace(
@@ -220,7 +216,10 @@ def csmar_list_tables(database_name: str) -> CallToolResult:
     try:
         records = client.list_tables(params.database_name)
         result = ListTablesOutput(
-            items=[TableListItem(table_code=record.table_code, table_name=record.table_name) for record in records],
+            items=[
+                TableListItem(table_code=record.table_code, table_name=record.table_name)
+                for record in records
+            ],
         )
         _safe_log_trace(
             client,
@@ -230,7 +229,9 @@ def csmar_list_tables(database_name: str) -> CallToolResult:
             result_summary={"count": len(result.items)},
             cached=cached,
         )
-        return success(result.as_dict(), f"Returned {len(result.items)} tables from {params.database_name}.")
+        return success(
+            result.as_dict(), f"Returned {len(result.items)} tables from {params.database_name}."
+        )
     except CsmarError as error:
         _safe_log_trace(
             client,
@@ -242,159 +243,6 @@ def csmar_list_tables(database_name: str) -> CallToolResult:
             error=error,
         )
         return failure(enrich_error(client, error, database_name=params.database_name))
-
-
-@mcp.tool(
-    name="csmar_search_tables",
-    description=(
-        "Search table candidates by business topic, table code, or table name. If database_name is provided, copy it "
-        "verbatim from csmar_list_databases."
-    ),
-    annotations=ToolAnnotations(
-        title="Search Tables",
-        readOnlyHint=True,
-        destructiveHint=False,
-        idempotentHint=True,
-        openWorldHint=True,
-    ),
-)
-@tool_error_boundary("csmar_search_tables", on_unexpected_error=_audit_unexpected_tool_error)
-def csmar_search_tables(query: str, database_name: str | None = None, limit: int = 5) -> CallToolResult:
-    started_at = _now_utc()
-    request_payload: dict[str, object] = {"query": query, "database_name": database_name, "limit": limit}
-    try:
-        params = SearchTablesInput.model_validate(
-            {"query": query, "database_name": database_name, "limit": limit}
-        )
-    except ValidationError as error:
-        _log_invalid_arguments_trace(
-            tool_name="csmar_search_tables",
-            request_payload=request_payload,
-            started_at=started_at,
-        )
-        return invalid_arguments(error)
-
-    client = _client()
-    cached = bool(
-        params.database_name and client.has_cached_entry("tables", params.database_name.strip())
-    )
-    try:
-        result = SearchTablesOutput(
-            items=client.search_tables(params.query, database_name=params.database_name, limit=params.limit)
-        )
-        _safe_log_trace(
-            client,
-            tool_name="csmar_search_tables",
-            request_payload=params.as_dict(),
-            started_at=started_at,
-            result_summary={"count": len(result.items)},
-            cached=cached,
-        )
-        return success(result.as_dict(), f"Returned {len(result.items)} matching tables.")
-    except CsmarError as error:
-        _safe_log_trace(
-            client,
-            tool_name="csmar_search_tables",
-            request_payload=params.as_dict(),
-            started_at=started_at,
-            result_summary=None,
-            cached=cached,
-            error=error,
-        )
-        return failure(enrich_error(client, error, database_name=params.database_name))
-
-
-@mcp.tool(
-    name="csmar_search_fields",
-    description=(
-        "Search field candidates by deterministic literal/similarity matching and optional scope filters. "
-        "Use role_hint/frequency_hint as ranking bias only."
-    ),
-    annotations=ToolAnnotations(
-        title="Search Fields",
-        readOnlyHint=True,
-        destructiveHint=False,
-        idempotentHint=True,
-        openWorldHint=True,
-    ),
-)
-@tool_error_boundary("csmar_search_fields", on_unexpected_error=_audit_unexpected_tool_error)
-def csmar_search_fields(
-    query: str,
-    database_name: str | None = None,
-    table_code: str | None = None,
-    role_hint: str | None = None,
-    frequency_hint: str | None = None,
-    limit: int = 20,
-) -> CallToolResult:
-    started_at = _now_utc()
-    request_payload: dict[str, object] = {
-        "query": query,
-        "database_name": database_name,
-        "table_code": table_code,
-        "role_hint": role_hint,
-        "frequency_hint": frequency_hint,
-        "limit": limit,
-    }
-    try:
-        params = SearchFieldsInput.model_validate(
-            {
-                "query": query,
-                "database_name": database_name,
-                "table_code": table_code,
-                "role_hint": role_hint,
-                "frequency_hint": frequency_hint,
-                "limit": limit,
-            }
-        )
-    except ValidationError as error:
-        _log_invalid_arguments_trace(
-            tool_name="csmar_search_fields",
-            request_payload=request_payload,
-            started_at=started_at,
-        )
-        return invalid_arguments(error)
-
-    client = _client()
-    cached = bool(params.table_code and client.has_cached_entry("schema", params.table_code.strip()))
-    try:
-        result = SearchFieldsOutput(
-            items=client.search_fields(
-                query=params.query,
-                database_name=params.database_name,
-                table_code=params.table_code,
-                role_hint=params.role_hint,
-                frequency_hint=params.frequency_hint,
-                limit=params.limit,
-            )
-        )
-        _safe_log_trace(
-            client,
-            tool_name="csmar_search_fields",
-            request_payload=params.as_dict(),
-            started_at=started_at,
-            result_summary={"count": len(result.items)},
-            cached=cached,
-        )
-        return success(result.as_dict(), f"Returned {len(result.items)} matching fields.")
-    except CsmarError as error:
-        _safe_log_trace(
-            client,
-            tool_name="csmar_search_fields",
-            request_payload=params.as_dict(),
-            started_at=started_at,
-            result_summary=None,
-            cached=cached,
-            error=error,
-        )
-        return failure(
-            enrich_error(
-                client,
-                error,
-                database_name=params.database_name,
-                table_code=params.table_code,
-            )
-        )
 
 
 @mcp.tool(

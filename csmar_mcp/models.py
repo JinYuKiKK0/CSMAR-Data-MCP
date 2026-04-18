@@ -9,10 +9,6 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
-def _generate_validation_id() -> str:
-    return f"validation_{uuid4().hex[:10]}"
-
-
 def _generate_download_id() -> str:
     return f"download_{uuid4().hex[:10]}"
 
@@ -91,57 +87,6 @@ class ListTablesOutput(StrictModel):
     items: list[TableListItem] = Field(..., description="Tables in the selected database.")
 
 
-class SearchTablesInput(StrictModel):
-    query: str = Field(
-        ...,
-        min_length=1,
-        description="Search text for business topic, table code, or table name.",
-    )
-    database_name: str | None = Field(
-        default=None,
-        min_length=1,
-        description="Optional purchased database name copied verbatim from csmar_list_databases.",
-    )
-    limit: int = Field(default=5, ge=1, le=5, description="Maximum number of tables to return (hard cap: 5).")
-
-
-class SearchTableItem(StrictModel):
-    table_code: str = Field(..., description="Table code used in later tool calls.")
-    table_name: str = Field(..., description="Human-readable table name.")
-    database_name: str = Field(..., description="Purchased database that contains the table.")
-    why_matched: str = Field(..., description="Short reason why this table matches the query.")
-    score: float = Field(..., ge=0.0, description="Relevance score in descending rank order.")
-
-
-class SearchTablesOutput(StrictModel):
-    items: list[SearchTableItem] = Field(..., description="Matching table candidates.")
-
-
-class SearchFieldsInput(StrictModel):
-    query: str = Field(
-        ...,
-        min_length=1,
-        description="Field lookup text for deterministic matching against field_name, label, and description.",
-    )
-    database_name: str | None = Field(
-        default=None,
-        min_length=1,
-        description="Optional database filter copied from csmar_list_databases.",
-    )
-    table_code: str | None = Field(
-        default=None,
-        min_length=1,
-        description="Optional table filter copied from csmar_search_tables or csmar_list_tables.",
-    )
-    role_hint: str | None = Field(default=None, min_length=1, description="Optional role hint for ranking bias.")
-    frequency_hint: str | None = Field(
-        default=None,
-        min_length=1,
-        description="Optional frequency hint for ranking bias.",
-    )
-    limit: int = Field(default=20, ge=1, le=50, description="Maximum number of fields to return.")
-
-
 class FieldSchemaItem(StrictModel):
     field_name: str = Field(..., description="Field code used in columns and conditions.")
     field_label: str | None = Field(default=None, description="Human-readable field label.")
@@ -156,23 +101,10 @@ class FieldSchemaItem(StrictModel):
         return _clean_tags(value)
 
 
-class SearchFieldItem(FieldSchemaItem):
-    table_code: str = Field(..., description="Table code that contains this field.")
-    table_name: str = Field(..., description="Human-readable table name.")
-    database_name: str = Field(..., description="Purchased database that contains this field.")
-    why_matched: str = Field(
-        ...,
-        description="Short deterministic reason for match (exact/contains/similar + optional hint bias).",
-    )
-    score: float = Field(..., ge=0.0, description="Relevance score in descending rank order.")
-
-
-class SearchFieldsOutput(StrictModel):
-    items: list[SearchFieldItem] = Field(..., description="Matching field candidates.")
-
-
 class GetTableSchemaInput(StrictModel):
-    table_code: str = Field(..., min_length=1, description="Table code returned by search or list tools.")
+    table_code: str = Field(
+        ..., min_length=1, description="Table code returned by search or list tools."
+    )
 
 
 class GetTableSchemaOutput(StrictModel):
@@ -202,14 +134,16 @@ class ProbeQueryInput(StrictModel):
         return _validate_date(value)
 
     @model_validator(mode="after")
-    def validate_date_range(self) -> "ProbeQueryInput":
+    def validate_date_range(self) -> ProbeQueryInput:
         if self.start_date and self.end_date and self.start_date > self.end_date:
             raise ValueError("start_date must be <= end_date")
         return self
 
 
 class ProbeQueryOutput(StrictModel):
-    validation_id: str = Field(..., description="Stable identifier used by csmar_materialize_query.")
+    validation_id: str = Field(
+        ..., description="Stable identifier used by csmar_materialize_query."
+    )
     query_fingerprint: str = Field(..., description="Stable hash for this logical query.")
     row_count: int = Field(..., ge=0, description="Number of rows matching this query.")
     sample_rows: list[dict[str, Any]] | None = Field(
@@ -220,7 +154,9 @@ class ProbeQueryOutput(StrictModel):
         default=None,
         description="Columns not found in the table schema.",
     )
-    can_materialize: bool = Field(..., description="Whether this validation can be materialized safely.")
+    can_materialize: bool = Field(
+        ..., description="Whether this validation can be materialized safely."
+    )
 
     @field_validator("invalid_columns")
     @classmethod
@@ -229,8 +165,12 @@ class ProbeQueryOutput(StrictModel):
 
 
 class MaterializeQueryInput(StrictModel):
-    validation_id: str = Field(..., min_length=1, description="Validation id returned by csmar_probe_query.")
-    output_dir: str = Field(..., min_length=1, description="Directory where ZIP and extracted files are written.")
+    validation_id: str = Field(
+        ..., min_length=1, description="Validation id returned by csmar_probe_query."
+    )
+    output_dir: str = Field(
+        ..., min_length=1, description="Directory where ZIP and extracted files are written."
+    )
 
 
 class MaterializeAudit(StrictModel):
@@ -240,9 +180,13 @@ class MaterializeAudit(StrictModel):
 
 
 class MaterializeQueryOutput(StrictModel):
-    download_id: str = Field(default_factory=_generate_download_id, description="Download identifier.")
+    download_id: str = Field(
+        default_factory=_generate_download_id, description="Download identifier."
+    )
     query_fingerprint: str = Field(..., description="Fingerprint copied from probe output.")
-    output_dir: str = Field(..., description="Absolute output directory used for this materialization.")
+    output_dir: str = Field(
+        ..., description="Absolute output directory used for this materialization."
+    )
     files: list[str] = Field(..., description="Absolute extracted file paths.")
     row_count: int = Field(..., ge=0, description="Row count copied from the probe stage.")
     archive_path: str = Field(..., description="Absolute ZIP archive path.")
