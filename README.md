@@ -1,42 +1,42 @@
 # CSMAR MCP
 
-Lean MCP server for CSMAR metadata discovery, probe validation, and local materialization for agent workflows.
+面向 Agent 工作流的精简 MCP 服务器：提供 CSMAR 元数据发现、查询可行性探测，以及本地物化。
 
-## Public Surface
+## 对外接口
 
-### Tools
+### 工具
 
 1. `csmar_list_databases`
-   Deterministically enumerate purchased databases.
+   确定性枚举已购买的数据库。
 
 2. `csmar_list_tables`
-   Deterministically enumerate tables under a purchased database.
+   确定性枚举指定数据库下的表。
 
 3. `csmar_get_table_schema`
-   Return pure table schema with field metadata. No preview rows.
+   返回纯表结构与字段元数据，不返回样本行。
 
 4. `csmar_probe_query`
-   Probe a query and return `validation_id`, `query_fingerprint`, row count, tiny sample, invalid columns, and materialization feasibility.
+   对查询进行预检，返回 `validation_id`、`query_fingerprint`、行数、少量样本、无效列，以及物化可行性。
 
 5. `csmar_materialize_query`
-   Materialize a previously probed query by `validation_id` into local files.
+   按 `validation_id` 将先前预检过的查询物化为本地文件。
 
-### Non-Goals for Public Surface
+### 对外接口的非目标
 
-- No public resources.
-- No public prompts.
-- No transport-layer tools like start/poll/unzip exposed to callers.
+- 不提供对外 resources。
+- 不提供对外 prompts。
+- 不对外暴露 start / poll / unzip 等传输层工具。
 
-## Design Principles
+## 设计原则
 
-- Single responsibility per tool.
-- Lean JSON outputs: return only fields needed for next step.
-- Repair-oriented errors: `code`, `message`, `hint`, plus optional `retry_after_seconds`, `suggested_args_patch`.
-- Date ranges are validated for format and ordering only, then passed through to SDK.
-- Query probe and materialization are linked by `validation_id`.
-- Runtime state is persisted in SQLite under `WORKSPACE_DIR/.stata_agent/csmar_mcp/`.
+- 每个工具职责单一。
+- JSON 输出精简：只返回下一步所需字段。
+- 面向修复的错误：`code`、`message`、`hint`，以及可选的 `retry_after_seconds`、`suggested_args_patch`。
+- 日期区间只做格式与顺序校验，随后原样透传给 SDK。
+- 查询的预检与物化通过 `validation_id` 串联。
+- 运行时状态持久化在 SQLite 中，路径为 `WORKSPACE_DIR/.stata_agent/csmar_mcp/`。
 
-## Tool Examples
+## 工具示例
 
 ### `csmar_list_databases`
 
@@ -82,7 +82,7 @@ Lean MCP server for CSMAR metadata discovery, probe validation, and local materi
 }
 ```
 
-## Runtime Defaults
+## 运行时默认值
 
 - `lang = "0"`
 - `belong = "0"`
@@ -91,19 +91,19 @@ Lean MCP server for CSMAR metadata discovery, probe validation, and local materi
 - `cache_ttl_minutes = 30`
 - `state_dir = WORKSPACE_DIR/.stata_agent/csmar_mcp/`
 
-## Environment
+## 环境要求
 
 - Python >= 3.12
 - [uv](https://docs.astral.sh/uv/)
 
-## Quick Start
+## 快速开始
 
 ```bash
 uv sync
 uv run csmar-mcp --account YOUR_ACCOUNT --password YOUR_PASSWORD
 ```
 
-## MCP Configuration
+## MCP 配置
 
 ```json
 {
@@ -125,10 +125,20 @@ uv run csmar-mcp --account YOUR_ACCOUNT --password YOUR_PASSWORD
 }
 ```
 
-## Notes
+## 开发：lint 与钩子
 
-- The server logs in automatically and retries once when authentication expires.
-- Probe and materialization flows reuse cache when possible to mitigate upstream rate limits.
-- Tool calls are audit-logged to local SQLite, including request payload, result summary, and upstream error metadata.
-- Invalid `database_name` or `table_code` returns repair-oriented errors with actionable suggestions.
-- Tool responses avoid returning complete datasets.
+- 安装开发依赖：`uv sync --group dev`
+- 本地 lint：`uv run python scripts/check.py`（默认只检查；`--fix` 模式跑 ruff 自动修复 + 格式化）
+- 启用仓库 git 钩子（一次性）：`git config core.hooksPath hooks`
+  - `pre-commit`：自动修复可修项并把改动 re-add 回本次 commit（仅限原本已暂存的 py 文件）
+  - `pre-push`：只读检查，作为绕过 commit 钩子的兜底
+- CI：`.github/workflows/lint.yml` 在 push 与 pull_request 上跑同一套 `scripts/check.py`
+- 扫描范围：`csmar_mcp` 与 `tests`，遗留 SDK `csmarapi/` 排除在外
+
+## 说明
+
+- 服务器在鉴权过期时会自动重新登录并重试一次。
+- 预检与物化流程尽量复用缓存，以缓解上游限流。
+- 工具调用会审计到本地 SQLite，包含请求参数、结果摘要与上游错误元数据。
+- 无效的 `database_name` 或 `table_code` 会返回面向修复的错误与可执行的修复建议。
+- 工具响应不返回完整数据集。
