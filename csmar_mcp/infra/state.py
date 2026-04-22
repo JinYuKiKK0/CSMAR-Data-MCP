@@ -9,20 +9,34 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+_METADATA_NAMESPACES: frozenset[str] = frozenset({"databases", "tables", "schema"})
+
 
 class PersistentState:
-    def __init__(self, cache_ttl_minutes: int = 30, state_dir: str | Path | None = None) -> None:
+    def __init__(
+        self,
+        cache_ttl_minutes: int = 30,
+        state_dir: str | Path | None = None,
+        *,
+        namespace_ttls: dict[str, timedelta] | None = None,
+    ) -> None:
+        if state_dir is None:
+            raise ValueError(
+                "PersistentState requires an explicit state_dir. Construct it through CsmarClient, "
+                "or pass a path directly in tests."
+            )
         self._lock = threading.RLock()
         self._cache_ttl = timedelta(minutes=max(1, cache_ttl_minutes))
-        base_dir = (
-            Path(state_dir) if state_dir is not None else Path.cwd() / ".stata_agent" / "csmar_mcp"
-        )
-        self._state_dir = base_dir.expanduser().resolve()
+        self._namespace_ttls: dict[str, timedelta] = dict(namespace_ttls or {})
+        self._state_dir = Path(state_dir).expanduser().resolve()
         self._state_dir.mkdir(parents=True, exist_ok=True)
         self._db_path = self._state_dir / "state.sqlite3"
         self._conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._initialize_schema()
+
+    def _ttl_for(self, namespace: str) -> timedelta:
+        return self._namespace_ttls.get(namespace, self._cache_ttl)
 
     def close(self) -> None:
         with self._lock:
@@ -42,7 +56,7 @@ class PersistentState:
                 return None
 
             created_at = datetime.fromtimestamp(float(row["created_at"]), tz=UTC)
-            if self._now() - created_at > self._cache_ttl:
+            if self._now() - created_at > self._ttl_for(namespace):
                 self._conn.execute(
                     "DELETE FROM cache_entries WHERE namespace = ? AND cache_key = ?",
                     (namespace, key),
@@ -63,7 +77,7 @@ class PersistentState:
                 return False
 
             created_at = datetime.fromtimestamp(float(row["created_at"]), tz=UTC)
-            if self._now() - created_at > self._cache_ttl:
+            if self._now() - created_at > self._ttl_for(namespace):
                 self._conn.execute(
                     "DELETE FROM cache_entries WHERE namespace = ? AND cache_key = ?",
                     (namespace, key),
@@ -94,6 +108,41 @@ class PersistentState:
                 (namespace, key),
             )
             self._conn.commit()
+
+    def clear_namespace(self, namespace: str) -> int:
+        with self._lock:
+            cursor = self._conn.execute(
+                "DELETE FROM cache_entries WHERE namespace = ?", (namespace,)
+            )
+            self._conn.commit()
+            return int(cursor.rowcount or 0)
+
+    def list_cached(self, namespace: str) -> list[tuple[str, Any]]:
+        ttl = self._ttl_for(namespace)
+        now = self._now()
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT cache_key, created_at, payload FROM cache_entries WHERE namespace = ?",
+                (namespace,),
+            ).fetchall()
+
+            results: list[tuple[str, Any]] = []
+            expired_keys: list[str] = []
+            for row in rows:
+                created_at = datetime.fromtimestamp(float(row["created_at"]), tz=UTC)
+                if now - created_at > ttl:
+                    expired_keys.append(row["cache_key"])
+                    continue
+                results.append((row["cache_key"], copy.deepcopy(pickle.loads(row["payload"]))))
+
+            if expired_keys:
+                self._conn.executemany(
+                    "DELETE FROM cache_entries WHERE namespace = ? AND cache_key = ?",
+                    [(namespace, key) for key in expired_keys],
+                )
+                self._conn.commit()
+
+            return results
 
     def mark_rate_limited(self, key: str) -> None:
         with self._lock:

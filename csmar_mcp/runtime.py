@@ -15,6 +15,7 @@ class RuntimeSettings:
     account: str
     password: str
     state_dir: Path | None = None
+    metadata_ttl_days: int = 30
 
 
 DEFAULT_LANG = "0"
@@ -22,6 +23,7 @@ DEFAULT_BELONG = "0"
 DEFAULT_POLL_INTERVAL_SECONDS = 3
 DEFAULT_POLL_TIMEOUT_SECONDS = 900
 DEFAULT_CACHE_TTL_MINUTES = 30
+DEFAULT_METADATA_TTL_DAYS = 30
 
 
 _runtime_settings: RuntimeSettings | None = None
@@ -46,7 +48,26 @@ def parse_runtime_settings(argv: Sequence[str] | None = None) -> RuntimeSettings
         parser.error("Missing CSMAR credentials. Provide --account and --password.")
     raw_state_dir = os.getenv("CSMAR_MCP_STATE_DIR", "").strip()
     state_dir = Path(raw_state_dir).expanduser().resolve() if raw_state_dir else None
-    return RuntimeSettings(account=account, password=password, state_dir=state_dir)
+
+    raw_ttl_days = os.getenv("CSMAR_MCP_METADATA_TTL_DAYS", "").strip()
+    metadata_ttl_days = DEFAULT_METADATA_TTL_DAYS
+    if raw_ttl_days:
+        try:
+            parsed = int(raw_ttl_days)
+        except ValueError as error:
+            parser.error(
+                f"CSMAR_MCP_METADATA_TTL_DAYS must be an integer, got {raw_ttl_days!r}: {error}"
+            )
+        if parsed < 1:
+            parser.error("CSMAR_MCP_METADATA_TTL_DAYS must be >= 1")
+        metadata_ttl_days = parsed
+
+    return RuntimeSettings(
+        account=account,
+        password=password,
+        state_dir=state_dir,
+        metadata_ttl_days=metadata_ttl_days,
+    )
 
 
 def configure_runtime(settings: RuntimeSettings) -> None:
@@ -78,4 +99,5 @@ def get_client() -> CsmarClient:
         poll_timeout_seconds=DEFAULT_POLL_TIMEOUT_SECONDS,
         cache_ttl_minutes=DEFAULT_CACHE_TTL_MINUTES,
         state_dir=settings.state_dir,
+        metadata_ttl_days=settings.metadata_ttl_days,
     )

@@ -112,6 +112,93 @@ class GetTableSchemaOutput(StrictModel):
     fields: list[FieldSchemaItem] = Field(..., description="Schema fields.")
 
 
+class BulkSchemaInput(StrictModel):
+    table_codes: list[str] = Field(
+        ...,
+        min_length=1,
+        max_length=20,
+        description="Table codes to fetch. Cache-first; only missing entries hit CSMAR.",
+    )
+
+    @field_validator("table_codes")
+    @classmethod
+    def validate_codes(cls, value: list[str]) -> list[str]:
+        return _clean_columns(value)
+
+
+class BulkSchemaItem(StrictModel):
+    table_code: str = Field(..., description="Table code.")
+    source: str = Field(..., description="cache or live.")
+    fields: list[FieldSchemaItem] | None = Field(
+        default=None, description="Schema fields when available."
+    )
+    error: ToolErrorPayload | None = Field(
+        default=None, description="Per-table error when fetch failed."
+    )
+
+
+class BulkSchemaOutput(StrictModel):
+    items: list[BulkSchemaItem] = Field(..., description="Per-table results.")
+    cache_hits: int = Field(..., ge=0, description="Number of entries served from cache.")
+    live_calls: int = Field(..., ge=0, description="Number of upstream calls issued.")
+    failures: int = Field(..., ge=0, description="Number of tables that returned an error.")
+
+
+class SearchFieldInput(StrictModel):
+    keyword: str = Field(
+        ...,
+        min_length=1,
+        description="Case-insensitive substring; matched against field_code, table_code, and table_name.",
+    )
+    database: str | None = Field(
+        default=None,
+        description="Optional database name to scope the search. Must be already cached locally.",
+    )
+    limit: int = Field(default=50, ge=1, le=500, description="Max results to return.")
+
+
+class SearchFieldHit(StrictModel):
+    database: str = Field(..., description="Database name or empty if catalog not yet cached.")
+    table_code: str = Field(..., description="Table code.")
+    table_name: str = Field(..., description="Table name (may be empty if catalog not cached).")
+    field_code: str = Field(..., description="Field code.")
+    data_type: str = Field(..., description="Field data type, if known.")
+
+
+class SearchFieldOutput(StrictModel):
+    results: list[SearchFieldHit] = Field(..., description="Matched fields from local cache.")
+    hint: str | None = Field(default=None, description="Guidance when results are empty.")
+
+
+class RefreshCacheInput(StrictModel):
+    namespace: str = Field(
+        ...,
+        description="databases | tables | schema | all.",
+    )
+    key: str | None = Field(
+        default=None,
+        description="Optional specific cache key (e.g., table_code). Omit to clear the whole namespace.",
+    )
+
+    @field_validator("namespace")
+    @classmethod
+    def validate_namespace(cls, value: str) -> str:
+        allowed = {"databases", "tables", "schema", "all"}
+        if value not in allowed:
+            raise ValueError(f"namespace must be one of {sorted(allowed)}")
+        return value
+
+
+class RefreshCacheOutput(StrictModel):
+    cleared: dict[str, int] = Field(..., description="Number of entries cleared per namespace.")
+
+
+class ToolErrorPayload(StrictModel):
+    code: str = Field(..., description="Stable error code.")
+    message: str = Field(..., description="Short human-readable message.")
+    hint: str | None = Field(default=None, description="Suggested next step.")
+
+
 class ProbeQueryInput(StrictModel):
     table_code: str = Field(..., min_length=1, description="Table code.")
     columns: list[str] = Field(..., min_length=1, description="Columns to probe.")

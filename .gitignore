@@ -10,4 +10,5 @@ downloads
 notes/
 .idea/
 .stata_agent/
+csmar_mcp/csmar_mcp_cache/
 .env

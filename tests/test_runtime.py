@@ -47,6 +47,17 @@ class RuntimeSettingsTests(unittest.TestCase):
     def test_inmemory_state_alias_is_not_exported(self) -> None:
         self.assertNotIn("InMemoryState", infra.__all__)
 
+    def test_metadata_ttl_env_overrides_default(self) -> None:
+        env = {"CSMAR_MCP_METADATA_TTL_DAYS": "7"}
+        with patch.dict("os.environ", env, clear=False):
+            settings = parse_runtime_settings(["--account", "acc", "--password", "pwd"])
+        self.assertEqual(settings.metadata_ttl_days, 7)
+
+    def test_metadata_ttl_default_is_30_days(self) -> None:
+        with patch.dict("os.environ", {}, clear=False):
+            settings = parse_runtime_settings(["--account", "acc", "--password", "pwd"])
+        self.assertEqual(settings.metadata_ttl_days, 30)
+
 
 if __name__ == "__main__":
     unittest.main()

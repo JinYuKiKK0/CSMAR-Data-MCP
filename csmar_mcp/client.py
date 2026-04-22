@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -39,10 +39,19 @@ class CsmarClient:
         poll_timeout_seconds: int = 900,
         cache_ttl_minutes: int = 30,
         state_dir: str | Path | None = None,
+        metadata_ttl_days: int = 30,
     ) -> None:
         resolved_state_dir = Path(state_dir) if state_dir is not None else self._default_state_dir()
+        metadata_ttl = timedelta(days=max(1, metadata_ttl_days))
+        namespace_ttls = {
+            "databases": metadata_ttl,
+            "tables": metadata_ttl,
+            "schema": metadata_ttl,
+        }
         self._state = PersistentState(
-            cache_ttl_minutes=cache_ttl_minutes, state_dir=resolved_state_dir
+            cache_ttl_minutes=cache_ttl_minutes,
+            state_dir=resolved_state_dir,
+            namespace_ttls=namespace_ttls,
         )
         self._gateway = CsmarGateway(
             account=account,
@@ -56,7 +65,7 @@ class CsmarClient:
         self._query = QueryService(self._gateway, self._metadata, self._state)
 
     def _default_state_dir(self) -> Path:
-        return (Path.cwd() / ".stata_agent" / "csmar_mcp").resolve()
+        return (Path(__file__).resolve().parent / "csmar_mcp_cache").resolve()
 
     def has_cached_entry(self, namespace: str, key: str) -> bool:
         return self._state.has_cached(namespace, key)
@@ -120,6 +129,49 @@ class CsmarClient:
                 for item in self._metadata.read_table_schema(table_code)
             ],
         )
+
+    def bulk_read_schema(
+        self, table_codes: list[str]
+    ) -> list[tuple[str, list[FieldSchemaItem] | None, str, CsmarError | None]]:
+        outputs: list[tuple[str, list[FieldSchemaItem] | None, str, CsmarError | None]] = []
+        for code, fields, source, error in self._metadata.bulk_read_schema(table_codes):
+            if fields is None:
+                outputs.append((code, None, source, error))
+            else:
+                outputs.append(
+                    (
+                        code,
+                        [self._to_field_schema_item(field) for field in fields],
+                        source,
+                        error,
+                    )
+                )
+        return outputs
+
+    def search_field_in_cache(
+        self, keyword: str, database: str | None = None, limit: int = 50
+    ) -> list[dict[str, str]]:
+        return self._metadata.search_field_in_cache(keyword, database, limit)
+
+    def refresh_cache(self, namespace: str, key: str | None = None) -> dict[str, int]:
+        metadata_namespaces = ("databases", "tables", "schema")
+        cleared: dict[str, int] = {}
+        if namespace == "all":
+            for ns in metadata_namespaces:
+                cleared[ns] = self._state.clear_namespace(ns)
+            return cleared
+        if namespace not in metadata_namespaces:
+            raise CsmarError(
+                "invalid_arguments",
+                f"Unsupported namespace {namespace!r}.",
+                hint=f"Use one of: {', '.join((*metadata_namespaces, 'all'))}.",
+            )
+        if key is None:
+            cleared[namespace] = self._state.clear_namespace(namespace)
+        else:
+            self._state.delete_cached(namespace, key.strip())
+            cleared[namespace] = 1
+        return cleared
 
     def build_cache_key(
         self,

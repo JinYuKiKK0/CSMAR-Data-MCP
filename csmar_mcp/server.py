@@ -11,13 +11,22 @@ from pydantic import ValidationError
 from .client import CsmarClient
 from .core.errors import CsmarError
 from .models import (
+    BulkSchemaInput,
+    BulkSchemaItem,
+    BulkSchemaOutput,
     GetTableSchemaInput,
     ListDatabasesOutput,
     ListTablesInput,
     ListTablesOutput,
     MaterializeQueryInput,
     ProbeQueryInput,
+    RefreshCacheInput,
+    RefreshCacheOutput,
+    SearchFieldHit,
+    SearchFieldInput,
+    SearchFieldOutput,
     TableListItem,
+    ToolErrorPayload,
 )
 from .presenters import enrich_error, failure, invalid_arguments, success, tool_error_boundary
 from .runtime import configure_runtime, get_client, parse_runtime_settings
@@ -493,6 +502,213 @@ def csmar_materialize_query(validation_id: str, output_dir: str) -> CallToolResu
                 validation_id=params.validation_id,
             )
         )
+
+
+@mcp.tool(
+    name="csmar_bulk_schema",
+    description=(
+        "Fetch schemas for multiple table_codes in a single call. Cache-first: entries already in the "
+        "local metadata cache are returned instantly with source='cache'; only genuine misses hit CSMAR "
+        "(source='live') with at most 4 concurrent upstream calls. Prefer this over repeated "
+        "csmar_get_table_schema calls whenever you need 2+ tables."
+    ),
+    annotations=ToolAnnotations(
+        title="Bulk Get Table Schemas",
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    ),
+)
+@tool_error_boundary("csmar_bulk_schema", on_unexpected_error=_audit_unexpected_tool_error)
+def csmar_bulk_schema(table_codes: list[str]) -> CallToolResult:
+    started_at = _now_utc()
+    request_payload: dict[str, object] = {"table_codes": table_codes}
+    try:
+        params = BulkSchemaInput.model_validate({"table_codes": table_codes})
+    except ValidationError as error:
+        _log_invalid_arguments_trace(
+            tool_name="csmar_bulk_schema",
+            request_payload=request_payload,
+            started_at=started_at,
+        )
+        return invalid_arguments(error)
+
+    client = _client()
+    results = client.bulk_read_schema(list(params.table_codes))
+
+    items: list[BulkSchemaItem] = []
+    cache_hits = 0
+    live_calls = 0
+    failures = 0
+    for code, fields, source, error in results:
+        if source == "cache":
+            cache_hits += 1
+        else:
+            live_calls += 1
+        payload_error: ToolErrorPayload | None = None
+        if error is not None:
+            failures += 1
+            payload_error = ToolErrorPayload(
+                code=error.error_code,
+                message=error.message,
+                hint=error.hint,
+            )
+        items.append(
+            BulkSchemaItem(
+                table_code=code,
+                source=source,
+                fields=fields,
+                error=payload_error,
+            )
+        )
+
+    result = BulkSchemaOutput(
+        items=items,
+        cache_hits=cache_hits,
+        live_calls=live_calls,
+        failures=failures,
+    )
+    _safe_log_trace(
+        client,
+        tool_name="csmar_bulk_schema",
+        request_payload=params.as_dict(),
+        started_at=started_at,
+        result_summary={
+            "cache_hits": cache_hits,
+            "live_calls": live_calls,
+            "failures": failures,
+        },
+        cached=cache_hits > 0 and live_calls == 0,
+    )
+    summary = (
+        f"Bulk schema: {cache_hits} from cache, {live_calls} from upstream, {failures} failed."
+    )
+    return success(result.as_dict(), summary)
+
+
+@mcp.tool(
+    name="csmar_search_field",
+    description=(
+        "Search for field codes across the LOCAL metadata cache only. Zero CSMAR API calls. "
+        "Matches keyword (case-insensitive substring) against field_code, table_code, and table_name. "
+        "An empty result does NOT mean the field does not exist — it only means the relevant "
+        "table's schema has not been cached yet. In that case, fall back to csmar_list_tables / "
+        "csmar_get_table_schema to populate the cache, then retry."
+    ),
+    annotations=ToolAnnotations(
+        title="Search Field (Local Cache)",
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=False,
+    ),
+)
+@tool_error_boundary("csmar_search_field", on_unexpected_error=_audit_unexpected_tool_error)
+def csmar_search_field(
+    keyword: str,
+    database: str | None = None,
+    limit: int = 50,
+) -> CallToolResult:
+    started_at = _now_utc()
+    request_payload: dict[str, object] = {
+        "keyword": keyword,
+        "database": database,
+        "limit": limit,
+    }
+    try:
+        params = SearchFieldInput.model_validate(
+            {"keyword": keyword, "database": database, "limit": limit}
+        )
+    except ValidationError as error:
+        _log_invalid_arguments_trace(
+            tool_name="csmar_search_field",
+            request_payload=request_payload,
+            started_at=started_at,
+        )
+        return invalid_arguments(error)
+
+    client = _client()
+    hits = client.search_field_in_cache(params.keyword, params.database, params.limit)
+    hint = None
+    if not hits:
+        hint = (
+            "No match in local cache. Run csmar_list_tables / csmar_get_table_schema to populate "
+            "the cache, then retry."
+        )
+    result = SearchFieldOutput(
+        results=[SearchFieldHit(**hit) for hit in hits],
+        hint=hint,
+    )
+    _safe_log_trace(
+        client,
+        tool_name="csmar_search_field",
+        request_payload=params.as_dict(),
+        started_at=started_at,
+        result_summary={"hits": len(hits)},
+        cached=True,
+    )
+    summary = f"Local cache search returned {len(hits)} hit(s)."
+    return success(result.as_dict(), summary)
+
+
+@mcp.tool(
+    name="csmar_refresh_cache",
+    description=(
+        "Danger tool. Do NOT call unless the user explicitly asks to refresh the cached metadata "
+        "(e.g. they suspect a database/table structure changed or they just purchased new data). "
+        "Calling this will force subsequent metadata lookups to hit the rate-limited CSMAR API. "
+        "Never invoke pre-emptively, never as part of normal exploration. "
+        "namespace must be one of: databases, tables, schema, all. Optional key targets a single entry."
+    ),
+    annotations=ToolAnnotations(
+        title="Refresh Metadata Cache (Danger)",
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=False,
+        openWorldHint=False,
+    ),
+)
+@tool_error_boundary("csmar_refresh_cache", on_unexpected_error=_audit_unexpected_tool_error)
+def csmar_refresh_cache(namespace: str, key: str | None = None) -> CallToolResult:
+    started_at = _now_utc()
+    request_payload: dict[str, object] = {"namespace": namespace, "key": key}
+    try:
+        params = RefreshCacheInput.model_validate({"namespace": namespace, "key": key})
+    except ValidationError as error:
+        _log_invalid_arguments_trace(
+            tool_name="csmar_refresh_cache",
+            request_payload=request_payload,
+            started_at=started_at,
+        )
+        return invalid_arguments(error)
+
+    client = _client()
+    try:
+        cleared = client.refresh_cache(params.namespace, params.key)
+    except CsmarError as error:
+        _safe_log_trace(
+            client,
+            tool_name="csmar_refresh_cache",
+            request_payload=params.as_dict(),
+            started_at=started_at,
+            result_summary=None,
+            cached=False,
+            error=error,
+        )
+        return failure(enrich_error(client, error))
+
+    result = RefreshCacheOutput(cleared=cleared)
+    _safe_log_trace(
+        client,
+        tool_name="csmar_refresh_cache",
+        request_payload=params.as_dict(),
+        started_at=started_at,
+        result_summary={"total_cleared": sum(cleared.values())},
+        cached=False,
+    )
+    summary = f"Cleared cache entries: {cleared}."
+    return success(result.as_dict(), summary)
 
 
 def main(argv: Sequence[str] | None = None) -> None:

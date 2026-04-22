@@ -38,13 +38,17 @@
 ## Conventions
 
 - 认证仅通过 CLI 参数 --account 与 --password，不新增 .env 读取路径。
-- 运行时固定默认值：lang=0、belong=0、poll_interval_seconds=3、poll_timeout_seconds=900、cache_ttl_minutes=30。
+- 运行时固定默认值：lang=0、belong=0、poll_interval_seconds=3、poll_timeout_seconds=900、cache_ttl_minutes=30（业务查询）、metadata_ttl_days=30（元数据）。
+- 默认缓存目录：`<csmar_mcp 包目录>/csmar_mcp_cache/`（跟随包位置而非 cwd，天然跨会话共享）；`CSMAR_MCP_STATE_DIR` 可显式覆盖。
 - 当前对外工具面：
   - `csmar_list_databases`
   - `csmar_list_tables`
   - `csmar_get_table_schema`
+  - `csmar_bulk_schema`
+  - `csmar_search_field`
   - `csmar_probe_query`
   - `csmar_materialize_query`
+  - `csmar_refresh_cache`
 - 查询日期范围不做硬编码限制；仅校验 `YYYY-MM-DD` 格式与起止顺序，然后原样透传给 SDK。
 - 预览/样本行数保持小上限，以节省上下文。
 - 遇到上游限流时优先复用缓存并返回标准化 error_code，避免重复打上游。

@@ -6,7 +6,13 @@ from datetime import UTC, datetime
 from typing import Any, cast
 
 import csmar_mcp.server as server_module
+from csmar_mcp.models import (
+    BulkSchemaInput,
+    RefreshCacheInput,
+    SearchFieldInput,
+)
 from csmar_mcp.presenters import tool_error_boundary
+from pydantic import ValidationError
 
 
 class PresenterBoundaryTests(unittest.TestCase):
@@ -50,6 +56,49 @@ class PresenterBoundaryTests(unittest.TestCase):
             )
 
         self.assertTrue(any("tool trace" in line.lower() for line in captured.output))
+
+
+class NewToolRegistrationTests(unittest.IsolatedAsyncioTestCase):
+    async def _tool(self, name: str) -> Any:
+        tools = await server_module.mcp.list_tools()
+        for tool in tools:
+            if tool.name == name:
+                return tool
+        raise AssertionError(f"Tool {name!r} not registered")
+
+    async def test_refresh_cache_description_flags_danger(self) -> None:
+        tool = await self._tool("csmar_refresh_cache")
+        self.assertIn("Danger", tool.description or "")
+        self.assertTrue(tool.annotations.destructiveHint)
+
+    async def test_bulk_schema_registered_as_read_only(self) -> None:
+        tool = await self._tool("csmar_bulk_schema")
+        self.assertIn("Cache-first", tool.description or "")
+        self.assertTrue(tool.annotations.readOnlyHint)
+
+    async def test_search_field_description_declares_no_api_call(self) -> None:
+        tool = await self._tool("csmar_search_field")
+        description = tool.description or ""
+        self.assertIn("LOCAL", description)
+        self.assertIn("Zero CSMAR API calls", description)
+
+
+class NewToolInputValidationTests(unittest.TestCase):
+    def test_bulk_schema_rejects_empty_list(self) -> None:
+        with self.assertRaises(ValidationError):
+            BulkSchemaInput.model_validate({"table_codes": []})
+
+    def test_bulk_schema_rejects_over_twenty(self) -> None:
+        with self.assertRaises(ValidationError):
+            BulkSchemaInput.model_validate({"table_codes": [f"T{i}" for i in range(21)]})
+
+    def test_refresh_cache_rejects_unknown_namespace(self) -> None:
+        with self.assertRaises(ValidationError):
+            RefreshCacheInput.model_validate({"namespace": "probes"})
+
+    def test_search_field_requires_non_empty_keyword(self) -> None:
+        with self.assertRaises(ValidationError):
+            SearchFieldInput.model_validate({"keyword": ""})
 
 
 if __name__ == "__main__":

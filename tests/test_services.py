@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from csmar_mcp.core.errors import CsmarError
 from csmar_mcp.core.types import CatalogRecord, FieldSchemaRecord, ProbeSpec, ValidationRecord
@@ -142,6 +142,126 @@ class MetadataServiceTests(unittest.TestCase):
         fields = self.service.read_table_schema("BANK_Index")
         field_names = {field.field_name for field in fields}
         self.assertEqual(field_names, {"ROAA", "CapitalRatio"})
+
+    def test_bulk_read_schema_mixes_cache_and_live(self) -> None:
+        # Prime cache for FS_Income only.
+        self.service.read_table_schema("FS_Income")
+
+        results = self.service.bulk_read_schema(["FS_Income", "FS_Combas"])
+        by_code = {code: (fields, source, error) for code, fields, source, error in results}
+
+        self.assertEqual(by_code["FS_Income"][1], "cache")
+        self.assertIsNone(by_code["FS_Income"][2])
+        self.assertEqual(by_code["FS_Combas"][1], "live")
+        self.assertIsNone(by_code["FS_Combas"][2])
+
+    def test_search_field_in_cache_matches_field_code(self) -> None:
+        self.service.list_tables("银行财务")
+        self.service.read_table_schema("BANK_Index")
+
+        hits = self.service.search_field_in_cache("ROAA")
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0]["field_code"], "ROAA")
+        self.assertEqual(hits[0]["table_code"], "BANK_Index")
+        self.assertEqual(hits[0]["database"], "银行财务")
+
+    def test_search_field_returns_empty_when_cache_cold(self) -> None:
+        hits = self.service.search_field_in_cache("ROAA")
+        self.assertEqual(hits, [])
+
+    def test_search_field_respects_database_filter(self) -> None:
+        self.service.list_tables("财务报表")
+        self.service.list_tables("银行财务")
+        self.service.read_table_schema("FS_Combas")
+        self.service.read_table_schema("BANK_Index")
+
+        # Substring 'a' appears in field codes of both FS and BANK tables; database filter should scope.
+        hits_bank = self.service.search_field_in_cache("a", database="银行财务")
+        table_codes = {hit["table_code"] for hit in hits_bank}
+        self.assertEqual(table_codes, {"BANK_Index"})
+
+
+class MetadataSelfHealingTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.state = PersistentState(cache_ttl_minutes=30, state_dir=self.temp_dir.name)
+
+    def tearDown(self) -> None:
+        self.state.close()
+        self.temp_dir.cleanup()
+
+    def test_list_tables_retries_after_not_purchased(self) -> None:
+        # Seed a stale databases cache.
+        self.state.set_cached("databases", "all", ["stale_db", "real_db"])
+
+        class FlakyGateway:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def list_databases(self) -> list[str]:
+                return ["real_db"]
+
+            def list_tables(self, database_name: str) -> list[CatalogRecord]:
+                self.calls += 1
+                if self.calls == 1:
+                    raise CsmarError("not_purchased", "no access")
+                return [CatalogRecord(database_name=database_name, table_code="X", table_name="X")]
+
+            def list_field_schema_items(self, table_code: str) -> list[FieldSchemaRecord]:
+                return []
+
+        gateway = FlakyGateway()
+        service = MetadataService(gateway, self.state)
+        records = service.list_tables("real_db")
+        self.assertEqual([record.table_code for record in records], ["X"])
+        self.assertEqual(gateway.calls, 2)
+        # databases cache should have been invalidated (and therefore absent until next fetch).
+        self.assertIsNone(self.state.get_cached("databases", "all"))
+
+
+class NamespaceTTLTests(unittest.TestCase):
+    def test_metadata_namespace_uses_custom_ttl(self) -> None:
+        with tempfile.TemporaryDirectory() as state_dir:
+            state = PersistentState(
+                cache_ttl_minutes=1,
+                state_dir=state_dir,
+                namespace_ttls={"schema": timedelta(days=30)},
+            )
+            # Force timestamp far enough in the past that short TTL would expire it,
+            # but the metadata TTL should keep it alive.
+            state.set_cached("schema", "FS_Combas", ["field"])
+            # Manipulate created_at to two hours ago.
+            state._conn.execute(
+                "UPDATE cache_entries SET created_at = ? WHERE namespace = ? AND cache_key = ?",
+                ((datetime.now(UTC) - timedelta(hours=2)).timestamp(), "schema", "FS_Combas"),
+            )
+            state._conn.commit()
+            self.assertIsNotNone(state.get_cached("schema", "FS_Combas"))
+
+            # Short-TTL namespace should still expire.
+            state.set_cached("probes", "p1", ["row"])
+            state._conn.execute(
+                "UPDATE cache_entries SET created_at = ? WHERE namespace = ? AND cache_key = ?",
+                ((datetime.now(UTC) - timedelta(hours=2)).timestamp(), "probes", "p1"),
+            )
+            state._conn.commit()
+            self.assertIsNone(state.get_cached("probes", "p1"))
+            state.close()
+
+    def test_clear_namespace_counts_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as state_dir:
+            state = PersistentState(cache_ttl_minutes=30, state_dir=state_dir)
+            state.set_cached("schema", "A", ["x"])
+            state.set_cached("schema", "B", ["y"])
+            state.set_cached("tables", "db", ["z"])
+            self.assertEqual(state.clear_namespace("schema"), 2)
+            self.assertIsNone(state.get_cached("schema", "A"))
+            self.assertIsNotNone(state.get_cached("tables", "db"))
+            state.close()
+
+    def test_persistent_state_requires_state_dir(self) -> None:
+        with self.assertRaises(ValueError):
+            PersistentState(cache_ttl_minutes=30)
 
 
 class QueryServiceTests(unittest.TestCase):

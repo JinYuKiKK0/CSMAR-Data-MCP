@@ -82,8 +82,9 @@
 - `belong = "0"`
 - `poll_interval_seconds = 3`
 - `poll_timeout_seconds = 900`
-- `cache_ttl_minutes = 30`
-- `state_dir = WORKSPACE_DIR/.stata_agent/csmar_mcp/`
+- `cache_ttl_minutes = 30`（仅对业务查询缓存 `probes / validations / downloads` 生效）
+- `metadata_ttl_days = 30`（元数据缓存 `databases / tables / schema` 的默认 TTL，可用 `CSMAR_MCP_METADATA_TTL_DAYS` 覆盖）
+- `state_dir = <csmar_mcp 包目录>/csmar_mcp_cache/`（随包而非工作目录，天然跨会话共享；可用 `CSMAR_MCP_STATE_DIR` 环境变量显式覆盖）
 
 ## 环境要求
 
