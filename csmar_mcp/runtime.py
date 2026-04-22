@@ -30,30 +30,20 @@ _runtime_settings: RuntimeSettings | None = None
 def build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="csmar-mcp",
-        description=(
-            "Run the CSMAR MCP server. Account/password may be passed as CLI args or via "
-            "CSMAR_ACCOUNT / CSMAR_PASSWORD environment variables (CLI takes precedence)."
-        ),
+        description="Run the CSMAR MCP server. Credentials must be passed via --account and --password.",
     )
-    parser.add_argument(
-        "--account", default=None, help="CSMAR account (falls back to $CSMAR_ACCOUNT)"
-    )
-    parser.add_argument(
-        "--password", default=None, help="CSMAR password (falls back to $CSMAR_PASSWORD)"
-    )
+    parser.add_argument("--account", default=None, help="CSMAR account")
+    parser.add_argument("--password", default=None, help="CSMAR password")
     return parser
 
 
 def parse_runtime_settings(argv: Sequence[str] | None = None) -> RuntimeSettings:
     parser = build_argument_parser()
     args = parser.parse_args(argv)
-    account = args.account or os.getenv("CSMAR_ACCOUNT", "").strip() or None
-    password = args.password or os.getenv("CSMAR_PASSWORD", "").strip() or None
+    account = args.account
+    password = args.password
     if not account or not password:
-        parser.error(
-            "Missing CSMAR credentials. Provide --account/--password or set "
-            "CSMAR_ACCOUNT and CSMAR_PASSWORD environment variables."
-        )
+        parser.error("Missing CSMAR credentials. Provide --account and --password.")
     raw_state_dir = os.getenv("CSMAR_MCP_STATE_DIR", "").strip()
     state_dir = Path(raw_state_dir).expanduser().resolve() if raw_state_dir else None
     return RuntimeSettings(account=account, password=password, state_dir=state_dir)

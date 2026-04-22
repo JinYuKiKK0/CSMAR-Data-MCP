@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import os
 from collections.abc import Sequence
 from datetime import UTC, datetime
 
@@ -31,9 +30,6 @@ mcp = FastMCP(
         "validation, and csmar_materialize_query only after probe success. Tools return concise structured JSON "
         "and repair hints on failure."
     ),
-    json_response=True,
-    host=os.getenv("MCP_HOST", "0.0.0.0"),
-    port=int(os.getenv("MCP_PORT", "8000")),
 )
 
 
@@ -502,12 +498,7 @@ def csmar_materialize_query(validation_id: str, output_dir: str) -> CallToolResu
 def main(argv: Sequence[str] | None = None) -> None:
     settings = parse_runtime_settings(argv)
     configure_runtime(settings)
-    transport = os.getenv("MCP_TRANSPORT", "stdio")
-    if transport not in ("stdio", "sse", "streamable-http"):
-        raise SystemExit(
-            f"invalid MCP_TRANSPORT={transport!r}; expected one of stdio|sse|streamable-http"
-        )
-    mcp.run(transport=transport)
+    mcp.run(transport="stdio")
 
 
 if __name__ == "__main__":
