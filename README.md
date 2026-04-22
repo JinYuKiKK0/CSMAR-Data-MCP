@@ -122,8 +122,7 @@ uv run csmar-mcp --account YOUR_ACCOUNT --password YOUR_PASSWORD
 ## Docker 部署
 
 仓库内 `Dockerfile` + `docker-compose.yml` 提供容器化部署，容器默认通过 HTTP
-（`streamable-http` 传输）对外暴露 MCP，适合把服务部署到服务器后，由远端 Agent
-客户端以 URL 方式接入。
+（`streamable-http` 传输）对外暴露 MCP
 
 ### 前置
 
@@ -142,22 +141,18 @@ CSMAR_PASSWORD=your_password
 
 可选覆盖（均有默认值，按需调整）：
 
-| 变量 | 默认 | 说明 |
-| --- | --- | --- |
-| `MCP_TRANSPORT` | `streamable-http` | MCP 传输；容器内一般不改 |
-| `MCP_HOST` | `0.0.0.0` | 监听地址 |
-| `MCP_PORT` | `8000` | 监听端口；改了要同步调整 compose 端口映射 |
+| 变量                  | 默认                 | 说明                                                        |
+| --------------------- | -------------------- | ----------------------------------------------------------- |
+| `MCP_TRANSPORT`       | `streamable-http`    | MCP 传输；容器内一般不改                                    |
+| `MCP_HOST`            | `0.0.0.0`            | 监听地址                                                    |
+| `MCP_PORT`            | `8000`               | 监听端口；改了要同步调整 compose 端口映射                   |
 | `CSMAR_MCP_STATE_DIR` | `/var/lib/csmar-mcp` | SQLite 缓存与审计目录；对应 compose 的 `csmar_state` 命名卷 |
 
 ### 构建与启动
 
 ```bash
 docker compose up -d --build
-docker compose logs -f csmar-mcp   # 观察启动日志
 ```
-
-默认 compose 只把 8000 端口绑到 `127.0.0.1`，不对公网暴露；需要对外请改
-`docker-compose.yml` 的 `ports` 映射并自行加反向代理与鉴权。
 
 ### 客户端接入
 
@@ -169,14 +164,11 @@ MCP 的客户端（如 Claude Desktop 的 `url` 配置，或其他支持 streama
 {
   "mcpServers": {
     "csmar": {
-      "url": "http://127.0.0.1:8000"
+      "url": "http://127.0.0.1:8000/mcp"
     }
   }
 }
 ```
-
-若 Agent 客户端不支持 HTTP MCP，请回退到"快速开始"里的 stdio 方式（`uv run
-csmar-mcp --account ... --password ...`），两者互为替代。
 
 ### 持久化
 
