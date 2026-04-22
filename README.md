@@ -21,12 +21,6 @@
 5. `csmar_materialize_query`
    按 `validation_id` 将先前预检过的查询物化为本地文件。
 
-### 对外接口的非目标
-
-- 不提供对外 resources。
-- 不提供对外 prompts。
-- 不对外暴露 start / poll / unzip 等传输层工具。
-
 ## 设计原则
 
 - 每个工具职责单一。
@@ -124,6 +118,77 @@ uv run csmar-mcp --account YOUR_ACCOUNT --password YOUR_PASSWORD
   }
 }
 ```
+
+## Docker 部署
+
+仓库内 `Dockerfile` + `docker-compose.yml` 提供容器化部署，容器默认通过 HTTP
+（`streamable-http` 传输）对外暴露 MCP，适合把服务部署到服务器后，由远端 Agent
+客户端以 URL 方式接入。
+
+### 前置
+
+- 已安装 Docker 与 Docker Compose v2（`docker compose` 子命令可用）。
+- 仓库根目录有可用的 `uv.lock`。镜像构建使用 `uv sync --frozen`，而 `uv.lock` 在
+  `.gitignore` 中不入库，因此首次构建前需要本地先跑一次 `uv sync` 生成它。
+
+### 配置
+
+在仓库根创建 `.env`（`docker-compose.yml` 会加载它）：
+
+```env
+CSMAR_ACCOUNT=your_account
+CSMAR_PASSWORD=your_password
+```
+
+可选覆盖（均有默认值，按需调整）：
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `MCP_TRANSPORT` | `streamable-http` | MCP 传输；容器内一般不改 |
+| `MCP_HOST` | `0.0.0.0` | 监听地址 |
+| `MCP_PORT` | `8000` | 监听端口；改了要同步调整 compose 端口映射 |
+| `CSMAR_MCP_STATE_DIR` | `/var/lib/csmar-mcp` | SQLite 缓存与审计目录；对应 compose 的 `csmar_state` 命名卷 |
+
+### 构建与启动
+
+```bash
+docker compose up -d --build
+docker compose logs -f csmar-mcp   # 观察启动日志
+```
+
+默认 compose 只把 8000 端口绑到 `127.0.0.1`，不对公网暴露；需要对外请改
+`docker-compose.yml` 的 `ports` 映射并自行加反向代理与鉴权。
+
+### 客户端接入
+
+容器跑的是 HTTP 形态 MCP，客户端通过 URL 连接而非 stdio 子进程。以兼容 HTTP
+MCP 的客户端（如 Claude Desktop 的 `url` 配置，或其他支持 streamable-http
+的 Agent）为例：
+
+```json
+{
+  "mcpServers": {
+    "csmar": {
+      "url": "http://127.0.0.1:8000"
+    }
+  }
+}
+```
+
+若 Agent 客户端不支持 HTTP MCP，请回退到"快速开始"里的 stdio 方式（`uv run
+csmar-mcp --account ... --password ...`），两者互为替代。
+
+### 持久化
+
+- `csmar_state` 命名卷保存 SQLite 状态（缓存、validation registry、限流冷却、审计
+  trace）。升级镜像时卷会保留，历史缓存可复用。
+- `docker compose down -v` 会连带删除卷，慎用。
+
+### 钩子联动（可选）
+
+仓库另附 `hooks/post-commit`，在检测到 `.env` 与 `docker` 存在时会自动跑
+`docker compose up -d --build` 重建容器，适合自部署场景下每次提交后自动滚动。
+启用方式同前：`git config core.hooksPath hooks`。
 
 ## 开发：lint 与钩子
 
