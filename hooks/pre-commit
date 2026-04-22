@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# Run ruff --fix + ruff format + pyright on csmar_mcp and tests, then re-stage
+# files that ruff rewrote. Only files that were already staged will be re-added,
+# so the hook never silently pulls in unrelated working-copy changes.
+#
+# Activate with: git config core.hooksPath hooks
+set -e
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+mapfile -t staged_py < <(git diff --cached --name-only --diff-filter=ACM -- '*.py')
+
+if [ "${#staged_py[@]}" -gt 0 ]; then
+  # Detect partially-staged python files (same path appears in both cached and
+  # working-tree diffs). Re-adding such files after ruff --fix would pull the
+  # unstaged hunks into the commit, which is surprising behavior. Refuse.
+  mapfile -t unstaged_py < <(git diff --name-only -- '*.py')
+  mixed=()
+  for f in "${staged_py[@]}"; do
+    for g in "${unstaged_py[@]}"; do
+      if [ "$f" = "$g" ]; then
+        mixed+=("$f")
+        break
+      fi
+    done
+  done
+  if [ "${#mixed[@]}" -gt 0 ]; then
+    echo "[pre-commit] partially-staged python files detected; auto-fix would mix unstaged hunks into the commit:" >&2
+    printf '  %s\n' "${mixed[@]}" >&2
+    echo "[pre-commit] resolve with 'git add -p' / 'git stash -k' and retry." >&2
+    exit 1
+  fi
+fi
+
+uv run python scripts/check.py --fix
+
+if [ "${#staged_py[@]}" -gt 0 ]; then
+  git add -- "${staged_py[@]}"
+fi

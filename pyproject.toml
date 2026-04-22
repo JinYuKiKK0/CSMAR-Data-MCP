@@ -14,6 +14,12 @@ dependencies = [
 [project.scripts]
 csmar-mcp = "csmar_mcp.server:main"
 
+[dependency-groups]
+dev = [
+    "ruff>=0.14.0",
+    "pyright>=1.1.380",
+]
+
 [build-system]
 requires = ["hatchling>=1.27.0"]
 build-backend = "hatchling.build"
@@ -38,10 +44,23 @@ ban-relative-imports = "parents"
 quote-style = "double"
 
 [tool.pyright]
-include = ["csmar_mcp"]
+include = ["csmar_mcp", "tests"]
 exclude = ["csmarapi", "**/__pycache__"]
 pythonVersion = "3.12"
 typeCheckingMode = "strict"
 reportMissingTypeStubs = "warning"
-venvPath = "../.."
+venvPath = "."
 venv = ".venv"
+
+[[tool.pyright.executionEnvironments]]
+root = "tests"
+reportPrivateUsage = "none"
+reportArgumentType = "none"
+reportAttributeAccessIssue = "none"
+reportOptionalMemberAccess = "none"
+reportCallIssue = "none"
+reportUnknownMemberType = "none"
+reportUnknownVariableType = "none"
+reportUnknownArgumentType = "none"
+reportMissingParameterType = "none"
+reportUnknownParameterType = "none"

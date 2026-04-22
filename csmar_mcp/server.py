@@ -503,6 +503,10 @@ def main(argv: Sequence[str] | None = None) -> None:
     settings = parse_runtime_settings(argv)
     configure_runtime(settings)
     transport = os.getenv("MCP_TRANSPORT", "stdio")
+    if transport not in ("stdio", "sse", "streamable-http"):
+        raise SystemExit(
+            f"invalid MCP_TRANSPORT={transport!r}; expected one of stdio|sse|streamable-http"
+        )
     mcp.run(transport=transport)
 
 
