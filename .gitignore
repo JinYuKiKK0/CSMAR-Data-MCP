@@ -10,3 +10,4 @@ downloads
 notes/
 .idea/
 .stata_agent/
+.env

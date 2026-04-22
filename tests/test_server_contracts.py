@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import unittest
-from datetime import datetime, timezone
-from typing import Any, Callable, cast
+from collections.abc import Callable
+from datetime import UTC, datetime
+from typing import Any, cast
 
 import csmar_mcp.server as server_module
 from csmar_mcp.presenters import tool_error_boundary
@@ -36,16 +37,14 @@ class PresenterBoundaryTests(unittest.TestCase):
             def log_tool_trace(self, **kwargs: object) -> str:
                 raise RuntimeError("sqlite locked")
 
-        safe_log_trace = cast(
-            Callable[..., None], getattr(server_module, "_safe_log_trace")
-        )
+        safe_log_trace = cast(Callable[..., None], server_module._safe_log_trace)
 
         with self.assertLogs("csmar_mcp.server", level="WARNING") as captured:
             safe_log_trace(
                 cast(Any, _FailingClient()),
                 tool_name="csmar_probe_query",
                 request_payload={"table_code": "FS_Combas"},
-                started_at=datetime.now(timezone.utc),
+                started_at=datetime.now(UTC),
                 result_summary={"row_count": 1},
                 cached=False,
             )

@@ -5,10 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from csmar_mcp import infra
-from csmar_mcp.runtime import RuntimeSettings
-from csmar_mcp.runtime import configure_runtime
-from csmar_mcp.runtime import get_client
-from csmar_mcp.runtime import parse_runtime_settings
+from csmar_mcp.runtime import RuntimeSettings, configure_runtime, get_client, parse_runtime_settings
 
 
 class RuntimeSettingsTests(unittest.TestCase):

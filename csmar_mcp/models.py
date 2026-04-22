@@ -119,8 +119,8 @@ class ProbeQueryInput(StrictModel):
         default=None,
         description="CSMAR native condition string. Omit to query the whole table.",
     )
-    start_date: str | None = Field(default=None, description="Start date in YYYY-MM-DD format.")
-    end_date: str | None = Field(default=None, description="End date in YYYY-MM-DD format.")
+    start_date: str = Field(..., description="Start date in YYYY-MM-DD format. Required.")
+    end_date: str = Field(..., description="End date in YYYY-MM-DD format. Required.")
     sample_rows: int = Field(default=3, ge=0, le=5, description="Maximum sample rows to return.")
 
     @field_validator("columns")
@@ -130,12 +130,14 @@ class ProbeQueryInput(StrictModel):
 
     @field_validator("start_date", "end_date")
     @classmethod
-    def validate_dates(cls, value: str | None) -> str | None:
-        return _validate_date(value)
+    def validate_dates(cls, value: str) -> str:
+        validated = _validate_date(value)
+        assert validated is not None
+        return validated
 
     @model_validator(mode="after")
     def validate_date_range(self) -> ProbeQueryInput:
-        if self.start_date and self.end_date and self.start_date > self.end_date:
+        if self.start_date > self.end_date:
             raise ValueError("start_date must be <= end_date")
         return self
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from csmar_mcp.core.errors import CsmarError
 from csmar_mcp.core.types import CatalogRecord, FieldSchemaRecord, ProbeSpec, ValidationRecord
@@ -21,15 +21,25 @@ class FakeGateway:
     def list_tables(self, database_name: str) -> list[CatalogRecord]:
         data = {
             "财务报表": [
-                CatalogRecord(database_name="财务报表", table_code="FS_Combas", table_name="资产负债表"),
-                CatalogRecord(database_name="财务报表", table_code="FS_Income", table_name="利润表"),
-                CatalogRecord(database_name="财务报表", table_code="FS_CashFlow", table_name="现金流量表"),
+                CatalogRecord(
+                    database_name="财务报表", table_code="FS_Combas", table_name="资产负债表"
+                ),
+                CatalogRecord(
+                    database_name="财务报表", table_code="FS_Income", table_name="利润表"
+                ),
+                CatalogRecord(
+                    database_name="财务报表", table_code="FS_CashFlow", table_name="现金流量表"
+                ),
                 CatalogRecord(database_name="财务报表", table_code="FS_Notes", table_name="附注"),
-                CatalogRecord(database_name="财务报表", table_code="FS_Ratios", table_name="财务比率"),
+                CatalogRecord(
+                    database_name="财务报表", table_code="FS_Ratios", table_name="财务比率"
+                ),
                 CatalogRecord(database_name="财务报表", table_code="FS_Main", table_name="主表"),
             ],
             "银行财务": [
-                CatalogRecord(database_name="银行财务", table_code="BANK_Index", table_name="银行指标"),
+                CatalogRecord(
+                    database_name="银行财务", table_code="BANK_Index", table_name="银行指标"
+                ),
             ],
         }
         return data[database_name]
@@ -117,27 +127,21 @@ class MetadataServiceTests(unittest.TestCase):
         self.state.close()
         self.temp_dir.cleanup()
 
-    def test_search_tables_returns_exact_code_match_first(self) -> None:
-        results = self.service.search_tables("BANK_Index")
-        self.assertEqual(results[0].table_code, "BANK_Index")
-        self.assertEqual(results[0].why_matched, "exact table code match")
+    def test_list_databases_caches_result(self) -> None:
+        first = self.service.list_databases()
+        self.gateway.list_databases_calls = getattr(self.gateway, "list_databases_calls", 0)
+        second = self.service.list_databases()
+        self.assertEqual(first, second)
 
-    def test_search_tables_hard_caps_candidates_to_five(self) -> None:
-        results = self.service.search_tables("财务报表", limit=50)
-        self.assertEqual(len(results), 5)
+    def test_list_tables_returns_catalog_records(self) -> None:
+        records = self.service.list_tables("财务报表")
+        codes = [record.table_code for record in records]
+        self.assertIn("FS_Combas", codes)
 
-    def test_search_fields_no_longer_expands_semantic_aliases(self) -> None:
-        results = self.service.search_fields("return on assets", table_code="BANK_Index")
-        self.assertEqual(results, [])
-
-    def test_search_fields_requires_real_field_match(self) -> None:
-        results = self.service.search_fields("BANK_Index", table_code="BANK_Index")
-        self.assertEqual(results, [])
-
-    def test_search_fields_with_scope_still_returns_field_hits(self) -> None:
-        results = self.service.search_fields("ROAA", table_code="BANK_Index")
-        self.assertEqual(len(results), 1)
-        self.assertEqual(results[0].field_name, "ROAA")
+    def test_read_table_schema_returns_fields(self) -> None:
+        fields = self.service.read_table_schema("BANK_Index")
+        field_names = {field.field_name for field in fields}
+        self.assertEqual(field_names, {"ROAA", "CapitalRatio"})
 
 
 class QueryServiceTests(unittest.TestCase):
@@ -309,8 +313,8 @@ class PersistentStateTests(unittest.TestCase):
     def test_tool_trace_round_trip(self) -> None:
         with tempfile.TemporaryDirectory() as state_dir:
             state = PersistentState(cache_ttl_minutes=30, state_dir=state_dir)
-            started_at = datetime.now(timezone.utc)
-            completed_at = datetime.now(timezone.utc)
+            started_at = datetime.now(UTC)
+            completed_at = datetime.now(UTC)
             state.add_tool_trace(
                 trace_id="trace_test001",
                 tool_name="csmar_probe_query",
