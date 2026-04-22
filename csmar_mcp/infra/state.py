@@ -19,6 +19,7 @@ class PersistentState:
         state_dir: str | Path | None = None,
         *,
         namespace_ttls: dict[str, timedelta] | None = None,
+        rate_limit_cooldown_minutes: int = 30,
     ) -> None:
         if state_dir is None:
             raise ValueError(
@@ -27,6 +28,7 @@ class PersistentState:
             )
         self._lock = threading.RLock()
         self._cache_ttl = timedelta(minutes=max(1, cache_ttl_minutes))
+        self._rate_limit_cooldown = timedelta(minutes=max(1, rate_limit_cooldown_minutes))
         self._namespace_ttls: dict[str, timedelta] = dict(namespace_ttls or {})
         self._state_dir = Path(state_dir).expanduser().resolve()
         self._state_dir.mkdir(parents=True, exist_ok=True)
@@ -146,7 +148,7 @@ class PersistentState:
 
     def mark_rate_limited(self, key: str) -> None:
         with self._lock:
-            expires_at = (self._now() + self._cache_ttl).timestamp()
+            expires_at = (self._now() + self._rate_limit_cooldown).timestamp()
             self._conn.execute(
                 """
                 INSERT INTO rate_limit_cooldowns(cache_key, expires_at)

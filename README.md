@@ -7,19 +7,28 @@
 ### 工具
 
 1. `csmar_list_databases`
-   确定性枚举已购买的数据库。
+   确定性枚举已购买的数据库。命中元数据缓存时零 API 调用。
 
 2. `csmar_list_tables`
-   确定性枚举指定数据库下的表。
+   确定性枚举指定数据库下的表。命中元数据缓存时零 API 调用；若持旧缓存撞上 `not_purchased` 会自动失效并重取一次。
 
 3. `csmar_get_table_schema`
-   返回纯表结构与字段元数据，不返回样本行。
+   返回纯表结构与字段元数据，不返回样本行。命中元数据缓存时零 API 调用。
 
-4. `csmar_probe_query`
+4. `csmar_bulk_schema`
+   一次性获取多个 `table_code` 的表结构（上限 20 个）。cache-first：已缓存的条目零 API 调用，只有真正的 miss 会并发（上限 4）打 CSMAR。每个表返回 `source="cache"|"live"` 与可选 `error`，Agent 可据此感知真实配额消耗。**首选，避免重复调用 `csmar_get_table_schema`。**
+
+5. `csmar_search_field`
+   **纯本地缓存**字段检索，**零 CSMAR API 调用**。对 `keyword` 与 `field_code / table_code / table_name` 做大小写不敏感子串匹配，可选 `database` 过滤。空结果**不代表字段不存在**，只代表相关表的 schema 尚未被缓存 —— 此时退化到 `csmar_list_tables` / `csmar_get_table_schema` 热身缓存后再试。
+
+6. `csmar_probe_query`
    对查询进行预检，返回 `validation_id`、`query_fingerprint`、行数、少量样本、无效列，以及物化可行性。
 
-5. `csmar_materialize_query`
+7. `csmar_materialize_query`
    按 `validation_id` 将先前预检过的查询物化为本地文件。
+
+8. `csmar_refresh_cache` ⚠️ **危险工具**
+   显式失效元数据缓存（`databases` / `tables` / `schema` / `all`，可选指定 `key`）。**仅在用户明确要求刷新时调用** —— 例如用户怀疑表结构变更或新购了数据库。调用后后续元数据查询会直接打受限流的 CSMAR API，绝不可在常规探索中预调用。
 
 ## 设计原则
 
@@ -28,7 +37,7 @@
 - 面向修复的错误：`code`、`message`、`hint`，以及可选的 `retry_after_seconds`、`suggested_args_patch`。
 - 日期区间只做格式与顺序校验，随后原样透传给 SDK。
 - 查询的预检与物化通过 `validation_id` 串联。
-- 运行时状态持久化在 SQLite 中，路径为 `WORKSPACE_DIR/.stata_agent/csmar_mcp/`。
+- 运行时状态持久化在 SQLite 中，路径默认为 `<csmar_mcp 包目录>/csmar_mcp_cache/state.sqlite3`，跨工作目录的会话天然共享同一份缓存。
 
 ## 工具示例
 
@@ -51,6 +60,33 @@
 ```json
 {
   "table_code": "FS_Combas"
+}
+```
+
+### `csmar_bulk_schema`
+
+```json
+{
+  "table_codes": ["BANK_Index", "BANK_Loan", "BANK_CreditRisks"]
+}
+```
+
+### `csmar_search_field`
+
+```json
+{
+  "keyword": "Nplra",
+  "database": "银行财务",
+  "limit": 50
+}
+```
+
+### `csmar_refresh_cache`
+
+```json
+{
+  "namespace": "schema",
+  "key": "BANK_Loan"
 }
 ```
 
@@ -82,9 +118,36 @@
 - `belong = "0"`
 - `poll_interval_seconds = 3`
 - `poll_timeout_seconds = 900`
-- `cache_ttl_minutes = 30`（仅对业务查询缓存 `probes / validations / downloads` 生效）
+- `cache_ttl_minutes = 4320`（即 **3 天**，对业务查询缓存 `probes / validations / downloads` 生效）
 - `metadata_ttl_days = 30`（元数据缓存 `databases / tables / schema` 的默认 TTL，可用 `CSMAR_MCP_METADATA_TTL_DAYS` 覆盖）
+- `rate_limit_cooldown_minutes = 30`（上游限流冷却窗口，与业务缓存 TTL 解耦）
 - `state_dir = <csmar_mcp 包目录>/csmar_mcp_cache/`（随包而非工作目录，天然跨会话共享；可用 `CSMAR_MCP_STATE_DIR` 环境变量显式覆盖）
+
+## 缓存与限流策略
+
+CSMAR 后端每日 API 配额非常严苛，MCP 的核心策略是**把绝大多数调用挡在本地缓存层**，远程调用只用于真正必须拉数的 `probe_query` / `materialize_query` 以及首次的元数据拉取。
+
+**缓存分层**
+
+| 命名空间 | 用途 | 默认 TTL | 说明 |
+| --- | --- | --- | --- |
+| `databases` / `tables` / `schema` | 元数据 | **30 天** | 表结构长期不变；cache hit 完全不打 CSMAR |
+| `probes` / `validations` / `downloads` | 业务查询结果 | **3 天** | 覆盖同一查询在短期内的重复访问 |
+| `rate_limit_cooldowns` | 上游限流冷却 | 30 分钟（固定） | 与业务 TTL 解耦，避免误锁 3 天 |
+
+**跨目录共享**
+
+缓存 SQLite 文件固定在 `csmar_mcp` 包目录下的 `csmar_mcp_cache/state.sqlite3`，不跟随 `cwd`。在任何目录启动 MCP 会话都共享同一份缓存 —— 这是把限流风险降到最低的关键前提。
+
+**持旧缓存自愈**
+
+若 Agent 拿着过期的 `databases` 缓存去请求某个未购库，`list_tables` / `get_table_schema` 会捕获 `not_purchased` / `database_not_found` / `table_not_found`，自动失效 `databases` 缓存并重取一次上游，单点配额消耗换来整条链路的一致性。
+
+**Agent 最佳实践**
+
+- 批量需要多个表结构时**优先用 `csmar_bulk_schema`**，合并为一次 tool call。
+- 只知业务概念不知字段所属表时**先用 `csmar_search_field`** 查本地缓存，没命中再退化到 list/schema 下钻。
+- 不要在无明确理由的情况下调用 `csmar_refresh_cache`，它会强制穿透到 CSMAR API。
 
 ## 环境要求
 

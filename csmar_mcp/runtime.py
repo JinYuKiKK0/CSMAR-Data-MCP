@@ -22,8 +22,9 @@ DEFAULT_LANG = "0"
 DEFAULT_BELONG = "0"
 DEFAULT_POLL_INTERVAL_SECONDS = 3
 DEFAULT_POLL_TIMEOUT_SECONDS = 900
-DEFAULT_CACHE_TTL_MINUTES = 30
+DEFAULT_CACHE_TTL_MINUTES = 3 * 24 * 60  # 3 days — applies to probes/validations/downloads
 DEFAULT_METADATA_TTL_DAYS = 30
+DEFAULT_RATE_LIMIT_COOLDOWN_MINUTES = 30
 
 
 _runtime_settings: RuntimeSettings | None = None
@@ -100,4 +101,5 @@ def get_client() -> CsmarClient:
         cache_ttl_minutes=DEFAULT_CACHE_TTL_MINUTES,
         state_dir=settings.state_dir,
         metadata_ttl_days=settings.metadata_ttl_days,
+        rate_limit_cooldown_minutes=DEFAULT_RATE_LIMIT_COOLDOWN_MINUTES,
     )

@@ -40,6 +40,7 @@ class CsmarClient:
         cache_ttl_minutes: int = 30,
         state_dir: str | Path | None = None,
         metadata_ttl_days: int = 30,
+        rate_limit_cooldown_minutes: int = 30,
     ) -> None:
         resolved_state_dir = Path(state_dir) if state_dir is not None else self._default_state_dir()
         metadata_ttl = timedelta(days=max(1, metadata_ttl_days))
@@ -52,6 +53,7 @@ class CsmarClient:
             cache_ttl_minutes=cache_ttl_minutes,
             state_dir=resolved_state_dir,
             namespace_ttls=namespace_ttls,
+            rate_limit_cooldown_minutes=rate_limit_cooldown_minutes,
         )
         self._gateway = CsmarGateway(
             account=account,
