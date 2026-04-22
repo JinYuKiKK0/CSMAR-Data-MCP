@@ -35,8 +35,12 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "CSMAR_ACCOUNT / CSMAR_PASSWORD environment variables (CLI takes precedence)."
         ),
     )
-    parser.add_argument("--account", default=None, help="CSMAR account (falls back to $CSMAR_ACCOUNT)")
-    parser.add_argument("--password", default=None, help="CSMAR password (falls back to $CSMAR_PASSWORD)")
+    parser.add_argument(
+        "--account", default=None, help="CSMAR account (falls back to $CSMAR_ACCOUNT)"
+    )
+    parser.add_argument(
+        "--password", default=None, help="CSMAR password (falls back to $CSMAR_PASSWORD)"
+    )
     return parser
 
 
