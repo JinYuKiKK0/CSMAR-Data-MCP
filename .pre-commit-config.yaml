@@ -1,0 +1,15 @@
+repos:
+  - repo: local
+    hooks:
+      - id: check-fix
+        name: ruff+pyright (fix, pre-commit)
+        entry: uv run python scripts/check.py --fix
+        language: system
+        pass_filenames: false
+        stages: [pre-commit]
+      - id: check
+        name: ruff+pyright (check, pre-push)
+        entry: uv run python scripts/check.py
+        language: system
+        pass_filenames: false
+        stages: [pre-push]

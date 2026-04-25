@@ -187,9 +187,12 @@ uv run csmar-mcp --account YOUR_ACCOUNT --password YOUR_PASSWORD
 
 - 安装开发依赖：`uv sync --group dev`
 - 本地 lint：`uv run python scripts/check.py`（默认只检查；`--fix` 模式跑 ruff 自动修复 + 格式化）
-- 启用仓库 git 钩子（一次性）：`git config core.hooksPath hooks`
-  - `pre-commit`：自动修复可修项并把改动 re-add 回本次 commit（仅限原本已暂存的 py 文件）
-  - `pre-push`：只读检查，作为绕过 commit 钩子的兜底
+- 启用本地 git 钩子（一次性，基于 pre-commit framework）：
+  ```bash
+  uv run pre-commit install                       # 装 pre-commit 钩子：commit 前跑 --fix
+  uv run pre-commit install --hook-type pre-push  # 装 pre-push 钩子：push 前跑 check-only
+  ```
+  配置见仓内 `.pre-commit-config.yaml`。pre-commit framework 原生做 stash-and-restore，partial stage 安全。
 - CI：`.github/workflows/lint.yml` 在 push 与 pull_request 上跑同一套 `scripts/check.py`
 - 扫描范围：`csmar_mcp` 与 `tests`，遗留 SDK `csmarapi/` 排除在外
 

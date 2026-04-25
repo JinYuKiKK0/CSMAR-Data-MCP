@@ -18,6 +18,7 @@ csmar-mcp = "csmar_mcp.server:main"
 dev = [
     "ruff>=0.14.0",
     "pyright>=1.1.380",
+    "pre-commit>=3.7",
 ]
 
 [build-system]
@@ -49,8 +50,6 @@ exclude = ["csmarapi", "**/__pycache__"]
 pythonVersion = "3.12"
 typeCheckingMode = "strict"
 reportMissingTypeStubs = "warning"
-venvPath = "."
-venv = ".venv"
 
 [[tool.pyright.executionEnvironments]]
 root = "tests"
