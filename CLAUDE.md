@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 仓库定位
 
-CSMAR-Data-MCP 是面向 Agent 工作流的精简 MCP 服务器（FastMCP / stdio），把 CSMAR 上游 SDK 的元数据发现、查询预检、本地物化封装为 8 个 MCP 工具。本仓库既是独立 git 仓库，也作为 submodule 挂在上层 `Harness-Stata` 项目的 `packages/CSMAR-Data-MCP/` 下，被主 Agent 通过 stdio MCP 协议调用 —— **禁止跨仓库直接 import `csmar_mcp.services`**，所有外部使用都走 MCP 工具边界。
+CSMAR-Data-MCP 是面向 Agent 工作流的精简 MCP 服务器（FastMCP / stdio），把 CSMAR 上游 SDK 的元数据发现、查询预检、本地物化封装为 8 个 MCP 工具。本仓库既是独立 git 仓库，也作为 submodule 挂在上层 `Harness-Stata` 项目的 `csmar-mcp/` 下，被主 Agent 通过 stdio MCP 协议调用 —— **禁止跨仓库直接 import `csmar_mcp.services`**，所有外部使用都走 MCP 工具边界。
 
 详细工具语义、缓存 TTL、Agent 调用最佳实践见 `README.md`，本文不重复，只记录架构与开发约定。
 
