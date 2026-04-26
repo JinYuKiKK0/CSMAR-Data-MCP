@@ -34,10 +34,19 @@ from .runtime import configure_runtime, get_client, parse_runtime_settings
 mcp = FastMCP(
     name="csmar_mcp",
     instructions=(
-        "CSMAR MCP for StataAgent workflows. Use csmar_list_databases and csmar_list_tables for deterministic "
-        "enumeration, csmar_get_table_schema for precise schema inspection, csmar_probe_query for feasibility "
-        "validation, and csmar_materialize_query only after probe success. Tools return concise structured JSON "
-        "and repair hints on failure."
+        "CSMAR MCP for searching and downloading data from the CSMAR database: metadata discovery + "
+        "two-stage query (probe -> materialize). "
+        "Metadata discovery is cache-first to conserve CSMAR upstream quota. "
+        "Discovery order: (1) csmar_search_field to find candidate fields in the LOCAL cache (zero upstream "
+        "calls; empty result only means the table's schema is not cached yet, not that the field is absent); "
+        "(2) csmar_list_databases / csmar_list_tables for deterministic enumeration; "
+        "(3) csmar_bulk_schema to fetch schemas for 2+ tables in one call (cache-first, prefer over looping "
+        "csmar_get_table_schema); (4) csmar_get_table_schema only for a single targeted table. "
+        "Query execution: csmar_probe_query validates feasibility and returns validation_id + can_materialize; "
+        "call csmar_materialize_query only after a probe with can_materialize=true, passing the validation_id. "
+        "csmar_refresh_cache is a danger tool: invoke ONLY when the user explicitly asks to refresh metadata; "
+        "never call pre-emptively or as part of normal exploration. "
+        "All tools return concise structured JSON; on failure, follow the hint field to repair arguments and retry."
     ),
 )
 
