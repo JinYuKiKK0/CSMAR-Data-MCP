@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import json
 import unittest
 
 from csmar_mcp.models import ToolError
-from csmar_mcp.presenters import AGENT_RECOVERABLE_CODES, failure
+from csmar_mcp.presenters import AGENT_RECOVERABLE_CODES, failure, success
 
 
 class FailureIsErrorClassificationTests(unittest.TestCase):
@@ -49,3 +50,36 @@ class FailureIsErrorClassificationTests(unittest.TestCase):
 
     def test_recoverable_codes_set_matches_documented_classification(self) -> None:
         self.assertEqual(AGENT_RECOVERABLE_CODES, frozenset(self.SOFT_FAILURE_CODES))
+
+
+class SuccessContentShapeTests(unittest.TestCase):
+    def test_success_content_contains_summary_and_payload_json(self) -> None:
+        payload = {"databases": ["A", "B"], "count": 2}
+        result = success(payload, "Returned 2 databases.")
+        self.assertEqual(len(result.content), 2)
+        self.assertEqual(result.content[0].text, "Returned 2 databases.")
+        self.assertEqual(json.loads(result.content[1].text), payload)
+        self.assertEqual(result.structuredContent, payload)
+        self.assertFalse(result.isError)
+
+    def test_success_preserves_unicode(self) -> None:
+        payload = {"name": "中文数据库"}
+        result = success(payload, "ok")
+        self.assertIn("中文", result.content[1].text)
+
+
+class FailureContentShapeTests(unittest.TestCase):
+    def test_failure_content_contains_full_error_payload(self) -> None:
+        error = ToolError(code="table_not_found", message="m", hint="call list_tables")
+        result = failure(error)
+        decoded = json.loads(result.content[0].text)
+        self.assertEqual(decoded["code"], "table_not_found")
+        self.assertEqual(decoded["hint"], "call list_tables")
+        self.assertFalse(result.isError)
+
+    def test_failure_hard_exception_still_marks_is_error(self) -> None:
+        error = ToolError(code="auth_failed", message="m", hint="h")
+        result = failure(error)
+        self.assertTrue(result.isError)
+        decoded = json.loads(result.content[0].text)
+        self.assertEqual(decoded["code"], "auth_failed")

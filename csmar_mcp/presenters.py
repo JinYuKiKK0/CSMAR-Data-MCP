@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 from collections.abc import Callable
 from functools import wraps
 from inspect import signature
@@ -34,14 +35,20 @@ def text(value: str) -> TextContent:
 
 
 def success(payload: dict[str, Any], summary: str) -> CallToolResult:
-    return CallToolResult(content=[text(summary)], structuredContent=payload)
+    return CallToolResult(
+        content=[
+            text(summary),
+            text(json.dumps(payload, ensure_ascii=False)),
+        ],
+        structuredContent=payload,
+    )
 
 
 def failure(error: ToolError) -> CallToolResult:
     payload = error.as_dict()
     is_hard_exception = error.code not in AGENT_RECOVERABLE_CODES
     return CallToolResult(
-        content=[text(f"[{error.code}] {error.message}")],
+        content=[text(json.dumps(payload, ensure_ascii=False))],
         structuredContent=payload,
         isError=is_hard_exception,
     )
