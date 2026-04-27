@@ -44,10 +44,14 @@ class CsmarClient:
     ) -> None:
         resolved_state_dir = Path(state_dir) if state_dir is not None else self._default_state_dir()
         metadata_ttl = timedelta(days=max(1, metadata_ttl_days))
+        business_ttl = timedelta(days=3)
         namespace_ttls = {
             "databases": metadata_ttl,
             "tables": metadata_ttl,
             "schema": metadata_ttl,
+            "probes": business_ttl,
+            "validations": business_ttl,
+            "downloads": business_ttl,
         }
         self._state = PersistentState(
             cache_ttl_minutes=cache_ttl_minutes,
