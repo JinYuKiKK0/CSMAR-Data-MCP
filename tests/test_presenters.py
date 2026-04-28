@@ -53,19 +53,18 @@ class FailureIsErrorClassificationTests(unittest.TestCase):
 
 
 class SuccessContentShapeTests(unittest.TestCase):
-    def test_success_content_contains_summary_and_payload_json(self) -> None:
+    def test_success_content_contains_payload_json(self) -> None:
         payload = {"databases": ["A", "B"], "count": 2}
-        result = success(payload, "Returned 2 databases.")
-        self.assertEqual(len(result.content), 2)
-        self.assertEqual(result.content[0].text, "Returned 2 databases.")
-        self.assertEqual(json.loads(result.content[1].text), payload)
+        result = success(payload)
+        self.assertEqual(len(result.content), 1)
+        self.assertEqual(json.loads(result.content[0].text), payload)
         self.assertIsNone(result.structuredContent)
         self.assertFalse(result.isError)
 
     def test_success_preserves_unicode(self) -> None:
         payload = {"name": "中文数据库"}
-        result = success(payload, "ok")
-        self.assertIn("中文", result.content[1].text)
+        result = success(payload)
+        self.assertIn("中文", result.content[0].text)
 
 
 class FailureContentShapeTests(unittest.TestCase):

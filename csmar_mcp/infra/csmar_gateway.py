@@ -527,8 +527,8 @@ class CsmarGateway:
 
             field_name = self._pick_text(
                 raw_item,
-                preferred_keys=("field", "fieldName", "column", "columnName", "name", "value"),
-                token_hints=("field", "column", "name", "code"),
+                preferred_keys=("field", "column", "columnName", "value"),
+                token_hints=("field", "column", "code"),
             )
             if not field_name or field_name in seen:
                 continue
@@ -537,6 +537,7 @@ class CsmarGateway:
             field_label = self._pick_text(
                 raw_item,
                 preferred_keys=(
+                    "fieldName",
                     "fieldLabel",
                     "label",
                     "fieldNameCn",
@@ -616,6 +617,7 @@ class CsmarGateway:
                     "roleTags",
                     "roleTag",
                     "role",
+                    "fieldKey",
                     "dimension",
                     "measure",
                     "metric",

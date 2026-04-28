@@ -16,18 +16,19 @@
    返回纯表结构与字段元数据，不返回样本行。命中元数据缓存时零 API 调用。
 
 4. `csmar_bulk_schema`
-   一次性获取多个 `table_code` 的表结构（上限 20 个）。cache-first：已缓存的条目零 API 调用，只有真正的 miss 会并发（上限 4）打 CSMAR。每个表返回 `source="cache"|"live"` 与可选 `error`，Agent 可据此感知真实配额消耗。**首选，避免重复调用 `csmar_get_table_schema`。**
+   一次性获取多个 `table_code` 的表结构（上限 20 个）。cache-first：已缓存的条目零 API 调用，只有真正的 miss 会并发（上限 4）打 CSMAR。**首选，避免重复调用 `csmar_get_table_schema`。**
 
-5. `csmar_search_field`
+<!-- 5. `csmar_search_field`
    **纯本地缓存**字段检索，**零 CSMAR API 调用**。对 `keyword` 与 `field_code / table_code / table_name` 做大小写不敏感子串匹配，可选 `database` 过滤。空结果**不代表字段不存在**，只代表相关表的 schema 尚未被缓存 —— 此时退化到 `csmar_list_tables` / `csmar_get_table_schema` 热身缓存后再试。
+   暂不对外暴露。 -->
 
-6. `csmar_probe_query`
+5. `csmar_probe_query`
    对查询进行预检，返回 `validation_id`、`query_fingerprint`、行数、少量样本、无效列，以及物化可行性。
 
-7. `csmar_materialize_query`
+6. `csmar_materialize_query`
    按 `validation_id` 将先前预检过的查询物化为本地文件。
 
-8. `csmar_refresh_cache` ⚠️ **危险工具**
+7. `csmar_refresh_cache` ⚠️ **危险工具**
    显式失效元数据缓存（`databases` / `tables` / `schema` / `all`，可选指定 `key`）。**仅在用户明确要求刷新时调用** —— 例如用户怀疑表结构变更或新购了数据库。调用后后续元数据查询会直接打受限流的 CSMAR API，绝不可在常规探索中预调用。
 
 ## 设计原则
@@ -71,7 +72,7 @@
 }
 ```
 
-### `csmar_search_field`
+<!-- ### `csmar_search_field`
 
 ```json
 {
@@ -80,6 +81,7 @@
   "limit": 50
 }
 ```
+-->
 
 ### `csmar_refresh_cache`
 
@@ -146,7 +148,6 @@ CSMAR 后端每日 API 配额非常严苛，MCP 的核心策略是**把绝大多
 **Agent 最佳实践**
 
 - 批量需要多个表结构时**优先用 `csmar_bulk_schema`**，合并为一次 tool call。
-- 只知业务概念不知字段所属表时**先用 `csmar_search_field`** 查本地缓存，没命中再退化到 list/schema 下钻。
 - 不要在无明确理由的情况下调用 `csmar_refresh_cache`，它会强制穿透到 CSMAR API。
 
 ## 环境要求

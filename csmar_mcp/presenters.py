@@ -34,12 +34,9 @@ def text(value: str) -> TextContent:
     return TextContent(type="text", text=value)
 
 
-def success(payload: dict[str, Any], summary: str) -> CallToolResult:
+def success(payload: dict[str, Any]) -> CallToolResult:
     return CallToolResult(
-        content=[
-            text(summary),
-            text(json.dumps(payload, ensure_ascii=False)),
-        ],
+        content=[text(json.dumps(payload, ensure_ascii=False))],
     )
 
 

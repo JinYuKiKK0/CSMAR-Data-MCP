@@ -37,11 +37,9 @@ mcp = FastMCP(
         "CSMAR MCP for searching and downloading data from the CSMAR database: metadata discovery + "
         "two-stage query (probe -> materialize). "
         "Metadata discovery is cache-first to conserve CSMAR upstream quota. "
-        "Discovery order: (1) csmar_search_field to find candidate fields in the LOCAL cache (zero upstream "
-        "calls; empty result only means the table's schema is not cached yet, not that the field is absent); "
-        "(2) csmar_list_databases / csmar_list_tables for deterministic enumeration; "
-        "(3) csmar_bulk_schema to fetch schemas for 2+ tables in one call (cache-first, prefer over looping "
-        "csmar_get_table_schema); (4) csmar_get_table_schema only for a single targeted table. "
+        "Discovery order: (1) csmar_list_databases / csmar_list_tables for deterministic enumeration; "
+        "(2) csmar_bulk_schema to fetch schemas for 2+ tables in one call (cache-first, prefer over looping "
+        "csmar_get_table_schema); (3) csmar_get_table_schema only for a single targeted table. "
         "Query execution: csmar_probe_query validates feasibility and returns validation_id + can_materialize; "
         "call csmar_materialize_query only after a probe with can_materialize=true, passing the validation_id. "
         "csmar_refresh_cache is a danger tool: invoke ONLY when the user explicitly asks to refresh metadata; "
@@ -187,7 +185,7 @@ def csmar_list_databases() -> CallToolResult:
             result_summary={"count": len(result.databases)},
             cached=cached,
         )
-        return success(result.as_dict(), f"Returned {len(result.databases)} purchased databases.")
+        return success(result.as_dict())
     except CsmarError as error:
         _safe_log_trace(
             client,
@@ -246,9 +244,7 @@ def csmar_list_tables(database_name: str) -> CallToolResult:
             result_summary={"count": len(result.items)},
             cached=cached,
         )
-        return success(
-            result.as_dict(), f"Returned {len(result.items)} tables from {params.database_name}."
-        )
+        return success(result.as_dict())
     except CsmarError as error:
         _safe_log_trace(
             client,
@@ -299,7 +295,7 @@ def csmar_get_table_schema(table_code: str) -> CallToolResult:
             result_summary={"field_count": len(result.fields)},
             cached=cached,
         )
-        return success(result.as_dict(), f"Returned schema for {params.table_code}.")
+        return success(result.as_dict())
     except CsmarError as error:
         _safe_log_trace(
             client,
@@ -382,15 +378,6 @@ def csmar_probe_query(
     cached = client.has_cached_probe(cache_key)
     try:
         result = client.probe_query(params)
-        if result.invalid_columns:
-            summary = f"Probe completed for {params.table_code} with invalid columns; materialization is blocked."
-        elif not result.can_materialize:
-            summary = f"Probe completed for {params.table_code} with zero rows; materialization is blocked."
-        else:
-            summary = (
-                f"Probe completed for {params.table_code}: {result.row_count} rows, "
-                f"validation_id={result.validation_id}."
-            )
         _safe_log_trace(
             client,
             tool_name="csmar_probe_query",
@@ -405,7 +392,7 @@ def csmar_probe_query(
             query_fingerprint=result.query_fingerprint,
             validation_id=result.validation_id,
         )
-        return success(result.as_dict(), summary)
+        return success(result.as_dict())
     except CsmarError as error:
         _safe_log_trace(
             client,
@@ -482,13 +469,7 @@ def csmar_materialize_query(validation_id: str, output_dir: str) -> CallToolResu
             query_fingerprint=result.query_fingerprint,
             validation_id=params.validation_id,
         )
-        return success(
-            result.as_dict(),
-            (
-                f"Materialized query {result.query_fingerprint} into {len(result.files)} files "
-                f"(download_id={result.download_id})."
-            ),
-        )
+        return success(result.as_dict())
     except CsmarError as error:
         _safe_log_trace(
             client,
@@ -517,9 +498,9 @@ def csmar_materialize_query(validation_id: str, output_dir: str) -> CallToolResu
     name="csmar_bulk_schema",
     description=(
         "Fetch schemas for multiple table_codes in a single call. Cache-first: entries already in the "
-        "local metadata cache are returned instantly with source='cache'; only genuine misses hit CSMAR "
-        "(source='live') with at most 4 concurrent upstream calls. Prefer this over repeated "
-        "csmar_get_table_schema calls whenever you need 2+ tables."
+        "local metadata cache are returned instantly; only genuine misses hit CSMAR with at most 4 "
+        "concurrent upstream calls. Prefer this over repeated csmar_get_table_schema calls whenever "
+        "you need 2+ tables."
     ),
     annotations=ToolAnnotations(
         title="Bulk Get Table Schemas",
@@ -547,17 +528,9 @@ def csmar_bulk_schema(table_codes: list[str]) -> CallToolResult:
     results = client.bulk_read_schema(list(params.table_codes))
 
     items: list[BulkSchemaItem] = []
-    cache_hits = 0
-    live_calls = 0
-    failures = 0
-    for code, fields, source, error in results:
-        if source == "cache":
-            cache_hits += 1
-        else:
-            live_calls += 1
+    for code, fields, _source, error in results:
         payload_error: ToolErrorPayload | None = None
         if error is not None:
-            failures += 1
             payload_error = ToolErrorPayload(
                 code=error.error_code,
                 message=error.message,
@@ -566,53 +539,40 @@ def csmar_bulk_schema(table_codes: list[str]) -> CallToolResult:
         items.append(
             BulkSchemaItem(
                 table_code=code,
-                source=source,
                 fields=fields,
                 error=payload_error,
             )
         )
 
-    result = BulkSchemaOutput(
-        items=items,
-        cache_hits=cache_hits,
-        live_calls=live_calls,
-        failures=failures,
-    )
+    result = BulkSchemaOutput(items=items)
     _safe_log_trace(
         client,
         tool_name="csmar_bulk_schema",
         request_payload=params.as_dict(),
         started_at=started_at,
-        result_summary={
-            "cache_hits": cache_hits,
-            "live_calls": live_calls,
-            "failures": failures,
-        },
-        cached=cache_hits > 0 and live_calls == 0,
+        result_summary={"item_count": len(items)},
+        cached=False,
     )
-    summary = (
-        f"Bulk schema: {cache_hits} from cache, {live_calls} from upstream, {failures} failed."
-    )
-    return success(result.as_dict(), summary)
+    return success(result.as_dict())
 
 
-@mcp.tool(
-    name="csmar_search_field",
-    description=(
-        "Search for field codes across the LOCAL metadata cache only. Zero CSMAR API calls. "
-        "Matches keyword (case-insensitive substring) against field_code, table_code, and table_name. "
-        "An empty result does NOT mean the field does not exist — it only means the relevant "
-        "table's schema has not been cached yet. In that case, fall back to csmar_list_tables / "
-        "csmar_get_table_schema to populate the cache, then retry."
-    ),
-    annotations=ToolAnnotations(
-        title="Search Field (Local Cache)",
-        readOnlyHint=True,
-        destructiveHint=False,
-        idempotentHint=True,
-        openWorldHint=False,
-    ),
-)
+# @mcp.tool(
+#     name="csmar_search_field",
+#     description=(
+#         "Search for field codes across the LOCAL metadata cache only. Zero CSMAR API calls. "
+#         "Matches keyword (case-insensitive substring) against field_code, table_code, and table_name. "
+#         "An empty result does NOT mean the field does not exist — it only means the relevant "
+#         "table's schema has not been cached yet. In that case, fall back to csmar_list_tables / "
+#         "csmar_get_table_schema to populate the cache, then retry."
+#     ),
+#     annotations=ToolAnnotations(
+#         title="Search Field (Local Cache)",
+#         readOnlyHint=True,
+#         destructiveHint=False,
+#         idempotentHint=True,
+#         openWorldHint=False,
+#     ),
+# )
 @tool_error_boundary("csmar_search_field", on_unexpected_error=_audit_unexpected_tool_error)
 def csmar_search_field(
     keyword: str,
@@ -657,8 +617,7 @@ def csmar_search_field(
         result_summary={"hits": len(hits)},
         cached=True,
     )
-    summary = f"Local cache search returned {len(hits)} hit(s)."
-    return success(result.as_dict(), summary)
+    return success(result.as_dict())
 
 
 @mcp.tool(
@@ -716,8 +675,7 @@ def csmar_refresh_cache(namespace: str, key: str | None = None) -> CallToolResul
         result_summary={"total_cleared": sum(cleared.values())},
         cached=False,
     )
-    summary = f"Cleared cache entries: {cleared}."
-    return success(result.as_dict(), summary)
+    return success(result.as_dict())
 
 
 def main(argv: Sequence[str] | None = None) -> None:

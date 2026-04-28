@@ -137,7 +137,7 @@ class MetadataService:
                             "table_code": table_code,
                             "table_name": table_name or "",
                             "field_code": field_code,
-                            "data_type": field.data_type or "",
+                            # "data_type": field.data_type or "",
                         }
                     )
                     if len(hits) >= limit:

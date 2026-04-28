@@ -88,17 +88,17 @@ class ListTablesOutput(StrictModel):
 
 
 class FieldSchemaItem(StrictModel):
-    field_name: str = Field(..., description="Field code used in columns and conditions.")
+    field_code: str = Field(..., description="Field code used in columns and conditions.")
     field_label: str | None = Field(default=None, description="Human-readable field label.")
-    field_description: str | None = Field(default=None, description="Optional field description.")
-    data_type: str | None = Field(default=None, description="Optional field data type.")
-    frequency_tags: list[str] | None = Field(default=None, description="Optional frequency tags.")
-    role_tags: list[str] | None = Field(default=None, description="Optional role tags.")
+    # field_description: str | None = Field(default=None, description="Optional field description.")
+    # data_type: str | None = Field(default=None, description="Optional field data type.")
+    # frequency_tags: list[str] | None = Field(default=None, description="Optional frequency tags.")
+    # role_tags: list[str] | None = Field(default=None, description="Optional role tags.")
 
-    @field_validator("frequency_tags", "role_tags")
-    @classmethod
-    def validate_tags(cls, value: list[str] | None) -> list[str] | None:
-        return _clean_tags(value)
+    # @field_validator("frequency_tags", "role_tags")
+    # @classmethod
+    # def validate_tags(cls, value: list[str] | None) -> list[str] | None:
+    #     return _clean_tags(value)
 
 
 class GetTableSchemaInput(StrictModel):
@@ -128,7 +128,7 @@ class BulkSchemaInput(StrictModel):
 
 class BulkSchemaItem(StrictModel):
     table_code: str = Field(..., description="Table code.")
-    source: str = Field(..., description="cache or live.")
+    # source: str = Field(..., description="cache or live.")
     fields: list[FieldSchemaItem] | None = Field(
         default=None, description="Schema fields when available."
     )
@@ -139,9 +139,9 @@ class BulkSchemaItem(StrictModel):
 
 class BulkSchemaOutput(StrictModel):
     items: list[BulkSchemaItem] = Field(..., description="Per-table results.")
-    cache_hits: int = Field(..., ge=0, description="Number of entries served from cache.")
-    live_calls: int = Field(..., ge=0, description="Number of upstream calls issued.")
-    failures: int = Field(..., ge=0, description="Number of tables that returned an error.")
+    # cache_hits: int = Field(..., ge=0, description="Number of entries served from cache.")
+    # live_calls: int = Field(..., ge=0, description="Number of upstream calls issued.")
+    # failures: int = Field(..., ge=0, description="Number of tables that returned an error.")
 
 
 class SearchFieldInput(StrictModel):
@@ -162,7 +162,7 @@ class SearchFieldHit(StrictModel):
     table_code: str = Field(..., description="Table code.")
     table_name: str = Field(..., description="Table name (may be empty if catalog not cached).")
     field_code: str = Field(..., description="Field code.")
-    data_type: str = Field(..., description="Field data type, if known.")
+    # data_type: str = Field(..., description="Field data type, if known.")
 
 
 class SearchFieldOutput(StrictModel):

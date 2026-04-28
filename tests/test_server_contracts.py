@@ -76,11 +76,10 @@ class NewToolRegistrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Cache-first", tool.description or "")
         self.assertTrue(tool.annotations.readOnlyHint)
 
-    async def test_search_field_description_declares_no_api_call(self) -> None:
-        tool = await self._tool("csmar_search_field")
-        description = tool.description or ""
-        self.assertIn("LOCAL", description)
-        self.assertIn("Zero CSMAR API calls", description)
+    async def test_search_field_not_registered(self) -> None:
+        tools = await server_module.mcp.list_tools()
+        names = {tool.name for tool in tools}
+        self.assertNotIn("csmar_search_field", names)
 
 
 class NewToolInputValidationTests(unittest.TestCase):
