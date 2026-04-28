@@ -58,13 +58,14 @@ class SuccessContentShapeTests(unittest.TestCase):
         result = success(payload)
         self.assertEqual(len(result.content), 1)
         self.assertEqual(json.loads(result.content[0].text), payload)
-        self.assertIsNone(result.structuredContent)
+        self.assertEqual(result.structuredContent, payload)
         self.assertFalse(result.isError)
 
     def test_success_preserves_unicode(self) -> None:
         payload = {"name": "中文数据库"}
         result = success(payload)
         self.assertIn("中文", result.content[0].text)
+        self.assertEqual(result.structuredContent, payload)
 
 
 class FailureContentShapeTests(unittest.TestCase):
@@ -74,13 +75,13 @@ class FailureContentShapeTests(unittest.TestCase):
         decoded = json.loads(result.content[0].text)
         self.assertEqual(decoded["code"], "table_not_found")
         self.assertEqual(decoded["hint"], "call list_tables")
-        self.assertIsNone(result.structuredContent)
+        self.assertEqual(result.structuredContent, error.as_dict())
         self.assertFalse(result.isError)
 
     def test_failure_hard_exception_still_marks_is_error(self) -> None:
         error = ToolError(code="auth_failed", message="m", hint="h")
         result = failure(error)
         self.assertTrue(result.isError)
-        self.assertIsNone(result.structuredContent)
+        self.assertEqual(result.structuredContent, error.as_dict())
         decoded = json.loads(result.content[0].text)
         self.assertEqual(decoded["code"], "auth_failed")

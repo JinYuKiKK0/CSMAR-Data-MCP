@@ -4,7 +4,7 @@
       "command": "uv",
       "args": [
         "--directory",
-        "D:\\Developments\\PythonProject\\CSMAR-Data-MCP",
+        "D:\\Developments\\PythonProject\\Harness-Stata\\csmar-mcp",
         "run",
         "csmar-mcp",
         "--account",

@@ -37,6 +37,7 @@ def text(value: str) -> TextContent:
 def success(payload: dict[str, Any]) -> CallToolResult:
     return CallToolResult(
         content=[text(json.dumps(payload, ensure_ascii=False))],
+        structuredContent=payload,
     )
 
 
@@ -45,6 +46,7 @@ def failure(error: ToolError) -> CallToolResult:
     is_hard_exception = error.code not in AGENT_RECOVERABLE_CODES
     return CallToolResult(
         content=[text(json.dumps(payload, ensure_ascii=False))],
+        structuredContent=payload,
         isError=is_hard_exception,
     )
 
