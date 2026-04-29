@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Any
-
 from csmar_mcp.core.errors import CsmarError
 from csmar_mcp.core.types import CatalogRecord, FieldSchemaRecord
 from csmar_mcp.infra.csmar_gateway import CsmarGateway
@@ -99,62 +97,6 @@ class MetadataService:
                     results[index] = (code, fields, "live", error)
 
         return results
-
-    def search_field_in_cache(
-        self,
-        keyword: str,
-        database: str | None = None,
-        limit: int = 50,
-    ) -> list[dict[str, Any]]:
-        needle = keyword.strip().lower()
-        if not needle:
-            return []
-
-        allowed_codes: set[str] | None = None
-        if database is not None:
-            records = self._state.get_cached("tables", database.strip())
-            if records is None:
-                return []
-            allowed_codes = {record.table_code for record in records}
-
-        table_index = self._build_table_index()
-        schema_entries = self._state.list_cached("schema")
-
-        hits: list[dict[str, Any]] = []
-        for table_code, fields in schema_entries:
-            if allowed_codes is not None and table_code not in allowed_codes:
-                continue
-            catalog = table_index.get(table_code, (None, table_code))
-            database_name, table_name = catalog
-
-            table_code_match = needle in table_code.lower()
-            table_name_match = needle in table_name.lower() if table_name else False
-
-            for field in fields:
-                field_code = field.field_name or ""
-                if needle in field_code.lower() or table_code_match or table_name_match:
-                    hits.append(
-                        {
-                            "database": database_name or "",
-                            "table_code": table_code,
-                            "table_name": table_name or "",
-                            "field_code": field_code,
-                            "field_label": field.field_label,
-                            "data_type": field.data_type,
-                            "field_key": field.field_key,
-                            "nullable": field.nullable,
-                        }
-                    )
-                    if len(hits) >= limit:
-                        return hits
-        return hits
-
-    def _build_table_index(self) -> dict[str, tuple[str, str]]:
-        index: dict[str, tuple[str, str]] = {}
-        for _, records in self._state.list_cached("tables"):
-            for record in records:
-                index[record.table_code] = (record.database_name, record.table_name)
-        return index
 
     def _invalidate_database_catalog(self) -> None:
         self._state.delete_cached("databases", "all")

@@ -27,7 +27,6 @@ from .models import (
     ListTablesInput,
     MaterializeQueryInput,
     ProbeQueryInput,
-    SearchFieldInput,
 )
 from .runtime import (
     DEFAULT_BELONG,
@@ -179,36 +178,10 @@ async def materialize_query(request: Request) -> JSONResponse:
         return _csmar_error(error)
 
 
-async def search_field(request: Request) -> JSONResponse:
-    qp = request.query_params
-    raw: dict[str, Any] = {"keyword": qp.get("keyword"), "database": qp.get("database")}
-    limit_raw = qp.get("limit")
-    if limit_raw is not None:
-        try:
-            raw["limit"] = int(limit_raw)
-        except ValueError:
-            return JSONResponse(
-                {
-                    "ok": False,
-                    "source": "local",
-                    "error_code": "invalid_arguments",
-                    "message": "limit must be an integer",
-                },
-                status_code=422,
-            )
-    try:
-        params = SearchFieldInput.model_validate(raw)
-    except ValidationError as error:
-        return _validation_error(error)
-    hits = _get_client().search_field_in_cache(params.keyword, params.database, params.limit)
-    return _ok({"results": hits})
-
-
 routes = [
     Route("/list_databases", list_databases, methods=["GET"]),
     Route("/list_tables", list_tables, methods=["GET"]),
     Route("/get_table_schema", get_table_schema, methods=["GET"]),
-    Route("/search_field", search_field, methods=["GET"]),
     Route("/probe_query", probe_query, methods=["POST"]),
     Route("/materialize_query", materialize_query, methods=["POST"]),
 ]

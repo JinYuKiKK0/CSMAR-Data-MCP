@@ -22,9 +22,6 @@ from .models import (
     ProbeQueryInput,
     RefreshCacheInput,
     RefreshCacheOutput,
-    SearchFieldHit,
-    SearchFieldInput,
-    SearchFieldOutput,
     TableListItem,
     ToolErrorPayload,
 )
@@ -557,70 +554,6 @@ def csmar_bulk_schema(table_codes: list[str]) -> CallToolResult:
         started_at=started_at,
         result_summary={"item_count": len(items)},
         cached=False,
-    )
-    return success(result.as_dict())
-
-
-# @mcp.tool(
-#     name="csmar_search_field",
-#     description=(
-#         "Search for field codes across the LOCAL metadata cache only. Zero CSMAR API calls. "
-#         "Matches keyword (case-insensitive substring) against field_code, table_code, and table_name. "
-#         "An empty result does NOT mean the field does not exist — it only means the relevant "
-#         "table's schema has not been cached yet. In that case, fall back to csmar_list_tables / "
-#         "csmar_get_table_schema to populate the cache, then retry."
-#     ),
-#     annotations=ToolAnnotations(
-#         title="Search Field (Local Cache)",
-#         readOnlyHint=True,
-#         destructiveHint=False,
-#         idempotentHint=True,
-#         openWorldHint=False,
-#     ),
-# )
-@tool_error_boundary("csmar_search_field", on_unexpected_error=_audit_unexpected_tool_error)
-def csmar_search_field(
-    keyword: str,
-    database: str | None = None,
-    limit: int = 50,
-) -> CallToolResult:
-    started_at = _now_utc()
-    request_payload: dict[str, object] = {
-        "keyword": keyword,
-        "database": database,
-        "limit": limit,
-    }
-    try:
-        params = SearchFieldInput.model_validate(
-            {"keyword": keyword, "database": database, "limit": limit}
-        )
-    except ValidationError as error:
-        _log_invalid_arguments_trace(
-            tool_name="csmar_search_field",
-            request_payload=request_payload,
-            started_at=started_at,
-        )
-        return invalid_arguments(error)
-
-    client = _client()
-    hits = client.search_field_in_cache(params.keyword, params.database, params.limit)
-    hint = None
-    if not hits:
-        hint = (
-            "No match in local cache. Run csmar_list_tables / csmar_get_table_schema to populate "
-            "the cache, then retry."
-        )
-    result = SearchFieldOutput(
-        results=[SearchFieldHit(**hit) for hit in hits],
-        hint=hint,
-    )
-    _safe_log_trace(
-        client,
-        tool_name="csmar_search_field",
-        request_payload=params.as_dict(),
-        started_at=started_at,
-        result_summary={"hits": len(hits)},
-        cached=True,
     )
     return success(result.as_dict())
 

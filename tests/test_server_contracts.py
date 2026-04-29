@@ -9,7 +9,6 @@ import csmar_mcp.server as server_module
 from csmar_mcp.models import (
     BulkSchemaInput,
     RefreshCacheInput,
-    SearchFieldInput,
 )
 from csmar_mcp.presenters import tool_error_boundary
 from pydantic import ValidationError
@@ -76,11 +75,6 @@ class NewToolRegistrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Cache-first", tool.description or "")
         self.assertTrue(tool.annotations.readOnlyHint)
 
-    async def test_search_field_not_registered(self) -> None:
-        tools = await server_module.mcp.list_tools()
-        names = {tool.name for tool in tools}
-        self.assertNotIn("csmar_search_field", names)
-
 
 class NewToolInputValidationTests(unittest.TestCase):
     def test_bulk_schema_rejects_empty_list(self) -> None:
@@ -94,10 +88,6 @@ class NewToolInputValidationTests(unittest.TestCase):
     def test_refresh_cache_rejects_unknown_namespace(self) -> None:
         with self.assertRaises(ValidationError):
             RefreshCacheInput.model_validate({"namespace": "probes"})
-
-    def test_search_field_requires_non_empty_keyword(self) -> None:
-        with self.assertRaises(ValidationError):
-            SearchFieldInput.model_validate({"keyword": ""})
 
 
 if __name__ == "__main__":

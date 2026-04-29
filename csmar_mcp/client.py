@@ -154,11 +154,6 @@ class CsmarClient:
                 )
         return outputs
 
-    def search_field_in_cache(
-        self, keyword: str, database: str | None = None, limit: int = 50
-    ) -> list[dict[str, Any]]:
-        return self._metadata.search_field_in_cache(keyword, database, limit)
-
     def refresh_cache(self, namespace: str, key: str | None = None) -> dict[str, int]:
         metadata_namespaces = ("databases", "tables", "schema")
         cleared: dict[str, int] = {}

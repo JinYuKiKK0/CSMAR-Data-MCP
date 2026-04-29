@@ -18,10 +18,6 @@
 4. `csmar_bulk_schema`
    一次性获取多个 `table_code` 的表结构（上限 20 个）。cache-first：已缓存的条目零 API 调用，只有真正的 miss 会并发（上限 4）打 CSMAR。**首选，避免重复调用 `csmar_get_table_schema`。**
 
-<!-- 5. `csmar_search_field`
-   **纯本地缓存**字段检索，**零 CSMAR API 调用**。对 `keyword` 与 `field_code / table_code / table_name` 做大小写不敏感子串匹配，可选 `database` 过滤。空结果**不代表字段不存在**，只代表相关表的 schema 尚未被缓存 —— 此时退化到 `csmar_list_tables` / `csmar_get_table_schema` 热身缓存后再试。
-   暂不对外暴露。 -->
-
 5. `csmar_probe_query`
    对查询进行预检，返回 `validation_id`、`query_fingerprint`、行数、少量样本、无效列，以及物化可行性。
 
@@ -71,17 +67,6 @@
   "table_codes": ["BANK_Index", "BANK_Loan", "BANK_CreditRisks"]
 }
 ```
-
-<!-- ### `csmar_search_field`
-
-```json
-{
-  "keyword": "Nplra",
-  "database": "银行财务",
-  "limit": 50
-}
-```
--->
 
 ### `csmar_refresh_cache`
 

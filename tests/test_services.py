@@ -155,31 +155,6 @@ class MetadataServiceTests(unittest.TestCase):
         self.assertEqual(by_code["FS_Combas"][1], "live")
         self.assertIsNone(by_code["FS_Combas"][2])
 
-    def test_search_field_in_cache_matches_field_code(self) -> None:
-        self.service.list_tables("银行财务")
-        self.service.read_table_schema("BANK_Index")
-
-        hits = self.service.search_field_in_cache("ROAA")
-        self.assertEqual(len(hits), 1)
-        self.assertEqual(hits[0]["field_code"], "ROAA")
-        self.assertEqual(hits[0]["table_code"], "BANK_Index")
-        self.assertEqual(hits[0]["database"], "银行财务")
-
-    def test_search_field_returns_empty_when_cache_cold(self) -> None:
-        hits = self.service.search_field_in_cache("ROAA")
-        self.assertEqual(hits, [])
-
-    def test_search_field_respects_database_filter(self) -> None:
-        self.service.list_tables("财务报表")
-        self.service.list_tables("银行财务")
-        self.service.read_table_schema("FS_Combas")
-        self.service.read_table_schema("BANK_Index")
-
-        # Substring 'a' appears in field codes of both FS and BANK tables; database filter should scope.
-        hits_bank = self.service.search_field_in_cache("a", database="银行财务")
-        table_codes = {hit["table_code"] for hit in hits_bank}
-        self.assertEqual(table_codes, {"BANK_Index"})
-
 
 class MetadataSelfHealingTests(unittest.TestCase):
     def setUp(self) -> None:

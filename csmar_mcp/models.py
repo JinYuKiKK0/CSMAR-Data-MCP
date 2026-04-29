@@ -146,37 +146,6 @@ class BulkSchemaOutput(StrictModel):
     items: list[BulkSchemaItem] = Field(..., description="Per-table results.")
 
 
-class SearchFieldInput(StrictModel):
-    keyword: str = Field(
-        ...,
-        min_length=1,
-        description="Case-insensitive substring; matched against field_code, table_code, and table_name.",
-    )
-    database: str | None = Field(
-        default=None,
-        description="Optional database name to scope the search. Must be already cached locally.",
-    )
-    limit: int = Field(default=50, ge=1, le=500, description="Max results to return.")
-
-
-class SearchFieldHit(StrictModel):
-    database: str = Field(..., description="Database name or empty if catalog not yet cached.")
-    table_code: str = Field(..., description="Table code.")
-    table_name: str = Field(..., description="Table name (may be empty if catalog not cached).")
-    field_code: str = Field(..., description="Field code.")
-    field_label: str | None = Field(default=None, description="Human-readable field label.")
-    data_type: str | None = Field(default=None, description="Upstream-declared data type.")
-    field_key: str | None = Field(default=None, description="Upstream role key.")
-    nullable: bool | None = Field(
-        default=None, description="Whether upstream marks this field nullable."
-    )
-
-
-class SearchFieldOutput(StrictModel):
-    results: list[SearchFieldHit] = Field(..., description="Matched fields from local cache.")
-    hint: str | None = Field(default=None, description="Guidance when results are empty.")
-
-
 class RefreshCacheInput(StrictModel):
     namespace: str = Field(
         ...,
