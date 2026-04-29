@@ -44,11 +44,7 @@ class CsmarGateway:
 
     def list_databases(self) -> list[str]:
         response = self._get(self._service.urlUtil.getListDbsUrl(), include_belong=True)
-        return self._deduplicate(
-            self._normalize_name_list(
-                response.get("data"), dict_name_keys=("dbName", "databaseName", "name", "value")
-            )
-        )
+        return self._deduplicate(self._normalize_database_list(response.get("data")))
 
     def list_tables(self, database_name: str) -> list[CatalogRecord]:
         encoded_database_name = parse.quote(database_name)
@@ -421,40 +417,17 @@ class CsmarGateway:
         )
         return any(token in lowered_message for token in daily_limit_tokens)
 
-    def _normalize_name_list(self, values: Any, dict_name_keys: tuple[str, ...]) -> list[str]:
+    def _normalize_database_list(self, values: Any) -> list[str]:
         if not isinstance(values, list):
             return []
-
-        normalized_values: list[str] = []
+        out: list[str] = []
         for item in values:
-            if isinstance(item, str):
-                text = item.strip()
-                if text:
-                    normalized_values.append(text)
-                continue
-
             if not isinstance(item, dict):
                 continue
-
-            selected_value: str | None = None
-            for key in dict_name_keys:
-                raw_value = item.get(key)
-                if raw_value is not None and str(raw_value).strip():
-                    selected_value = str(raw_value).strip()
-                    break
-
-            if not selected_value:
-                for raw_value in item.values():
-                    if raw_value is not None and isinstance(raw_value, (str, int, float)):
-                        text = str(raw_value).strip()
-                        if text:
-                            selected_value = text
-                            break
-
-            if selected_value:
-                normalized_values.append(selected_value)
-
-        return normalized_values
+            name = self._to_text(item.get("databaseName"))
+            if name:
+                out.append(name)
+        return out
 
     def _normalize_table_list(self, database_name: str, values: Any) -> list[CatalogRecord]:
         if not isinstance(values, list):
@@ -464,46 +437,23 @@ class CsmarGateway:
         seen_codes: set[str] = set()
 
         for item in values:
-            if isinstance(item, str) or not isinstance(item, dict):
+            if not isinstance(item, dict):
                 continue
 
-            table_code: str | None = None
-            table_name: str | None = None
+            table_code = self._to_text(item.get("table"))
+            if table_code is None or table_code in seen_codes:
+                continue
+            seen_codes.add(table_code)
 
-            for code_key in ("tableCode", "code", "table", "tableNameEn", "engName"):
-                raw_value = item.get(code_key)
-                if raw_value is not None and str(raw_value).strip():
-                    table_code = str(raw_value).strip()
-                    break
-
-            for name_key in ("tableName", "name", "tableNameCn", "cnName"):
-                raw_value = item.get(name_key)
-                if raw_value is not None and str(raw_value).strip():
-                    table_name = str(raw_value).strip()
-                    break
-
-            if table_code is None:
-                for key, raw_value in item.items():
-                    if raw_value is None:
-                        continue
-                    text = str(raw_value).strip()
-                    if not text:
-                        continue
-                    lowered_key = key.lower()
-                    if "code" in lowered_key or "en" in lowered_key:
-                        table_code = text
-                    elif "name" in lowered_key or "cn" in lowered_key:
-                        table_name = text
-
-            if table_code and table_code not in seen_codes:
-                seen_codes.add(table_code)
-                table_records.append(
-                    CatalogRecord(
-                        database_name=database_name,
-                        table_code=table_code,
-                        table_name=table_name or table_code,
-                    )
+            table_records.append(
+                CatalogRecord(
+                    database_name=database_name,
+                    table_code=table_code,
+                    table_name=self._to_text(item.get("tableName")) or table_code,
+                    start_time=self._to_text(item.get("startTime")),
+                    end_time=self._to_text(item.get("endTime")),
                 )
+            )
 
         return table_records
 
@@ -514,189 +464,25 @@ class CsmarGateway:
         items: list[FieldSchemaRecord] = []
         seen: set[str] = set()
         for raw_item in values:
-            if isinstance(raw_item, str):
-                field_name = raw_item.strip()
-                if not field_name or field_name in seen:
-                    continue
-                seen.add(field_name)
-                items.append(FieldSchemaRecord(field_name=field_name))
-                continue
-
             if not isinstance(raw_item, dict):
                 continue
 
-            field_name = self._pick_text(
-                raw_item,
-                preferred_keys=("field", "column", "columnName", "value"),
-                token_hints=("field", "column", "code"),
-            )
-            if not field_name or field_name in seen:
+            field_name = self._to_text(raw_item.get("field"))
+            if field_name is None or field_name in seen:
                 continue
-
             seen.add(field_name)
-            field_label = self._pick_text(
-                raw_item,
-                preferred_keys=(
-                    "fieldName",
-                    "fieldLabel",
-                    "label",
-                    "fieldNameCn",
-                    "cnName",
-                    "nameCn",
-                    "displayName",
-                    "title",
-                    "caption",
-                    "fieldCaption",
-                    "alias",
-                    "zhName",
-                    "chsName",
-                    "itemName",
-                ),
-                token_hints=(
-                    "label",
-                    "title",
-                    "caption",
-                    "cn",
-                    "ch",
-                    "zh",
-                    "display",
-                    "alias",
-                    "item",
-                ),
-            )
-            if field_label == field_name:
-                field_label = None
-
-            field_description = self._pick_text(
-                raw_item,
-                preferred_keys=(
-                    "fieldDesc",
-                    "description",
-                    "remark",
-                    "comment",
-                    "memo",
-                    "help",
-                    "definition",
-                    "explain",
-                    "indicatorMeaning",
-                    "fieldMeaning",
-                ),
-                token_hints=(
-                    "desc",
-                    "description",
-                    "remark",
-                    "comment",
-                    "memo",
-                    "help",
-                    "meaning",
-                    "explain",
-                ),
-            )
-            data_type = self._pick_text(
-                raw_item,
-                preferred_keys=("dataType", "fieldType", "type", "valueType"),
-                token_hints=("type", "dtype"),
-            )
-
-            frequency_tags = self._extract_tags(
-                raw_item,
-                preferred_keys=(
-                    "frequencyTags",
-                    "frequencyTag",
-                    "freqTag",
-                    "frequency",
-                    "freq",
-                    "period",
-                    "cycle",
-                ),
-                token_hints=("frequency", "freq", "period", "cycle"),
-            )
-            role_tags = self._extract_tags(
-                raw_item,
-                preferred_keys=(
-                    "roleTags",
-                    "roleTag",
-                    "role",
-                    "fieldKey",
-                    "dimension",
-                    "measure",
-                    "metric",
-                    "identifier",
-                ),
-                token_hints=("role", "dimension", "measure", "metric", "identifier"),
-            )
 
             items.append(
                 FieldSchemaRecord(
                     field_name=field_name,
-                    field_label=field_label,
-                    field_description=field_description,
-                    data_type=data_type,
-                    frequency_tags=tuple(frequency_tags) if frequency_tags else None,
-                    role_tags=tuple(role_tags) if role_tags else None,
+                    field_label=self._to_text(raw_item.get("fieldName")),
+                    data_type=self._to_text(raw_item.get("fieldType")),
+                    field_key=self._to_text(raw_item.get("fieldKey")),
+                    nullable=self._parse_able_null(raw_item.get("ableNull")),
                 )
             )
 
         return items
-
-    def _pick_text(
-        self,
-        payload: dict[str, Any],
-        *,
-        preferred_keys: tuple[str, ...],
-        token_hints: tuple[str, ...],
-    ) -> str | None:
-        for key in preferred_keys:
-            value = payload.get(key)
-            text = self._to_text(value)
-            if text:
-                return text
-
-        lowered_map = {key.lower(): value for key, value in payload.items()}
-        for key in preferred_keys:
-            value = lowered_map.get(key.lower())
-            text = self._to_text(value)
-            if text:
-                return text
-
-        for key, value in payload.items():
-            lowered_key = key.lower()
-            if not any(token in lowered_key for token in token_hints):
-                continue
-            text = self._to_text(value)
-            if text:
-                return text
-        return None
-
-    def _extract_tags(
-        self,
-        payload: dict[str, Any],
-        *,
-        preferred_keys: tuple[str, ...],
-        token_hints: tuple[str, ...],
-    ) -> list[str] | None:
-        for key in preferred_keys:
-            if key in payload:
-                tags = self._to_tag_list(payload.get(key))
-                if tags:
-                    return tags
-
-        lowered_map = {key.lower(): value for key, value in payload.items()}
-        for key in preferred_keys:
-            if key.lower() in lowered_map:
-                tags = self._to_tag_list(lowered_map[key.lower()])
-                if tags:
-                    return tags
-
-        for key, value in payload.items():
-            lowered_key = key.lower()
-            if not any(token in lowered_key for token in token_hints):
-                continue
-            tags = self._to_tag_list(value)
-            if tags:
-                return tags
-
-        return None
 
     def _to_text(self, value: Any) -> str | None:
         if value is None:
@@ -706,35 +492,16 @@ class CsmarGateway:
             return text or None
         return None
 
-    def _to_tag_list(self, value: Any) -> list[str] | None:
-        raw_values: list[str] = []
-        if value is None:
+    def _parse_able_null(self, value: Any) -> bool | None:
+        text = self._to_text(value)
+        if text is None:
             return None
-
-        if isinstance(value, str):
-            raw_values = [item.strip() for item in re.split(r"[,;|/，；、]", value) if item.strip()]  # noqa: RUF001
-        elif isinstance(value, (list, tuple, set)):
-            for item in value:
-                text = self._to_text(item)
-                if text:
-                    raw_values.append(text)
-        else:
-            text = self._to_text(value)
-            if text:
-                raw_values = [text]
-
-        if not raw_values:
-            return None
-
-        deduplicated: list[str] = []
-        seen: set[str] = set()
-        for item in raw_values:
-            if item in seen:
-                continue
-            seen.add(item)
-            deduplicated.append(item)
-
-        return deduplicated or None
+        upper = text.upper()
+        if upper == "YES":
+            return True
+        if upper == "NO":
+            return False
+        return None
 
     def _extract_first_int(self, value: Any) -> int | None:
         if isinstance(value, bool):

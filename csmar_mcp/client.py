@@ -156,7 +156,7 @@ class CsmarClient:
 
     def search_field_in_cache(
         self, keyword: str, database: str | None = None, limit: int = 50
-    ) -> list[dict[str, str]]:
+    ) -> list[dict[str, Any]]:
         return self._metadata.search_field_in_cache(keyword, database, limit)
 
     def refresh_cache(self, namespace: str, key: str | None = None) -> dict[str, int]:
@@ -255,10 +255,9 @@ class CsmarClient:
         return FieldSchemaItem(
             field_code=item.field_name,
             field_label=item.field_label,
-            # field_description=item.field_description,
-            # data_type=item.data_type,
-            # frequency_tags=list(item.frequency_tags) if item.frequency_tags else None,
-            # role_tags=list(item.role_tags) if item.role_tags else None,
+            data_type=item.data_type,
+            field_key=item.field_key,
+            nullable=item.nullable,
         )
 
     def _to_probe_query_output(self, result: ProbeResult) -> ProbeQueryOutput:

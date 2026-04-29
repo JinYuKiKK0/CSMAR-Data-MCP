@@ -232,7 +232,12 @@ def csmar_list_tables(database_name: str) -> CallToolResult:
         records = client.list_tables(params.database_name)
         result = ListTablesOutput(
             items=[
-                TableListItem(table_code=record.table_code, table_name=record.table_name)
+                TableListItem(
+                    table_code=record.table_code,
+                    table_name=record.table_name,
+                    start_time=record.start_time,
+                    end_time=record.end_time,
+                )
                 for record in records
             ],
         )

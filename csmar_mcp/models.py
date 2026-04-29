@@ -81,6 +81,12 @@ class ListTablesInput(StrictModel):
 class TableListItem(StrictModel):
     table_code: str = Field(..., description="Table code used in later tool calls.")
     table_name: str = Field(..., description="Human-readable table name.")
+    start_time: str | None = Field(
+        default=None, description="Earliest data date upstream advertises for this table."
+    )
+    end_time: str | None = Field(
+        default=None, description="Latest data date upstream advertises for this table."
+    )
 
 
 class ListTablesOutput(StrictModel):
@@ -90,15 +96,15 @@ class ListTablesOutput(StrictModel):
 class FieldSchemaItem(StrictModel):
     field_code: str = Field(..., description="Field code used in columns and conditions.")
     field_label: str | None = Field(default=None, description="Human-readable field label.")
-    # field_description: str | None = Field(default=None, description="Optional field description.")
-    # data_type: str | None = Field(default=None, description="Optional field data type.")
-    # frequency_tags: list[str] | None = Field(default=None, description="Optional frequency tags.")
-    # role_tags: list[str] | None = Field(default=None, description="Optional role tags.")
-
-    # @field_validator("frequency_tags", "role_tags")
-    # @classmethod
-    # def validate_tags(cls, value: list[str] | None) -> list[str] | None:
-    #     return _clean_tags(value)
+    data_type: str | None = Field(
+        default=None, description="Upstream-declared data type, e.g. varchar / decimal."
+    )
+    field_key: str | None = Field(
+        default=None, description="Upstream role key, e.g. Code (primary) / Date (temporal)."
+    )
+    nullable: bool | None = Field(
+        default=None, description="Whether upstream marks this field nullable."
+    )
 
 
 class GetTableSchemaInput(StrictModel):
@@ -128,7 +134,6 @@ class BulkSchemaInput(StrictModel):
 
 class BulkSchemaItem(StrictModel):
     table_code: str = Field(..., description="Table code.")
-    # source: str = Field(..., description="cache or live.")
     fields: list[FieldSchemaItem] | None = Field(
         default=None, description="Schema fields when available."
     )
@@ -139,9 +144,6 @@ class BulkSchemaItem(StrictModel):
 
 class BulkSchemaOutput(StrictModel):
     items: list[BulkSchemaItem] = Field(..., description="Per-table results.")
-    # cache_hits: int = Field(..., ge=0, description="Number of entries served from cache.")
-    # live_calls: int = Field(..., ge=0, description="Number of upstream calls issued.")
-    # failures: int = Field(..., ge=0, description="Number of tables that returned an error.")
 
 
 class SearchFieldInput(StrictModel):
@@ -162,7 +164,12 @@ class SearchFieldHit(StrictModel):
     table_code: str = Field(..., description="Table code.")
     table_name: str = Field(..., description="Table name (may be empty if catalog not cached).")
     field_code: str = Field(..., description="Field code.")
-    # data_type: str = Field(..., description="Field data type, if known.")
+    field_label: str | None = Field(default=None, description="Human-readable field label.")
+    data_type: str | None = Field(default=None, description="Upstream-declared data type.")
+    field_key: str | None = Field(default=None, description="Upstream role key.")
+    nullable: bool | None = Field(
+        default=None, description="Whether upstream marks this field nullable."
+    )
 
 
 class SearchFieldOutput(StrictModel):

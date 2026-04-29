@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from csmar_mcp.core.errors import CsmarError
 from csmar_mcp.core.types import CatalogRecord, FieldSchemaRecord
 from csmar_mcp.infra.csmar_gateway import CsmarGateway
@@ -103,7 +105,7 @@ class MetadataService:
         keyword: str,
         database: str | None = None,
         limit: int = 50,
-    ) -> list[dict[str, str]]:
+    ) -> list[dict[str, Any]]:
         needle = keyword.strip().lower()
         if not needle:
             return []
@@ -118,7 +120,7 @@ class MetadataService:
         table_index = self._build_table_index()
         schema_entries = self._state.list_cached("schema")
 
-        hits: list[dict[str, str]] = []
+        hits: list[dict[str, Any]] = []
         for table_code, fields in schema_entries:
             if allowed_codes is not None and table_code not in allowed_codes:
                 continue
@@ -137,7 +139,10 @@ class MetadataService:
                             "table_code": table_code,
                             "table_name": table_name or "",
                             "field_code": field_code,
-                            # "data_type": field.data_type or "",
+                            "field_label": field.field_label,
+                            "data_type": field.data_type,
+                            "field_key": field.field_key,
+                            "nullable": field.nullable,
                         }
                     )
                     if len(hits) >= limit:

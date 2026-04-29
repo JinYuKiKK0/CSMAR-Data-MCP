@@ -10,16 +10,17 @@ class CatalogRecord:
     database_name: str
     table_code: str
     table_name: str
+    start_time: str | None = None
+    end_time: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class FieldSchemaRecord:
     field_name: str
     field_label: str | None = None
-    field_description: str | None = None
     data_type: str | None = None
-    frequency_tags: tuple[str, ...] | None = None
-    role_tags: tuple[str, ...] | None = None
+    field_key: str | None = None
+    nullable: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
