@@ -66,17 +66,20 @@ class MetadataService:
 
     def bulk_read_schema(
         self, table_codes: list[str]
-    ) -> list[tuple[str, list[FieldSchemaRecord] | None, str, CsmarError | None]]:
-        results: list[tuple[str, list[FieldSchemaRecord] | None, str, CsmarError | None]] = []
+    ) -> list[tuple[str, str | None, list[FieldSchemaRecord] | None, str, CsmarError | None]]:
+        name_by_code = self._collect_cached_table_names()
+        results: list[
+            tuple[str, str | None, list[FieldSchemaRecord] | None, str, CsmarError | None]
+        ] = []
         misses: list[str] = []
         for raw_code in table_codes:
             code = raw_code.strip()
             cached = self._state.get_cached("schema", code)
             if cached is not None:
-                results.append((code, list(cached), "cache", None))
+                results.append((code, name_by_code.get(code), list(cached), "cache", None))
             else:
                 misses.append(code)
-                results.append((code, None, "live", None))
+                results.append((code, name_by_code.get(code), None, "live", None))
 
         if misses:
             from concurrent.futures import ThreadPoolExecutor
@@ -91,12 +94,22 @@ class MetadataService:
                 fetched = list(pool.map(_fetch, misses))
 
             fetched_by_code = {code: (fields, error) for code, fields, error in fetched}
-            for index, (code, _, source, _) in enumerate(results):
+            for index, (code, name, _, source, _) in enumerate(results):
                 if source == "live" and code in fetched_by_code:
                     fields, error = fetched_by_code[code]
-                    results[index] = (code, fields, "live", error)
+                    results[index] = (code, name, fields, "live", error)
 
         return results
+
+    def _collect_cached_table_names(self) -> dict[str, str]:
+        mapping: dict[str, str] = {}
+        for _db_key, records in self._state.list_cached("tables"):
+            if not isinstance(records, list):
+                continue
+            for record in records:  # pyright: ignore[reportUnknownVariableType]
+                if isinstance(record, CatalogRecord):
+                    mapping.setdefault(record.table_code, record.table_name)
+        return mapping
 
     def _invalidate_database_catalog(self) -> None:
         self._state.delete_cached("databases", "all")

@@ -530,7 +530,7 @@ def csmar_bulk_schema(table_codes: list[str]) -> CallToolResult:
     results = client.bulk_read_schema(list(params.table_codes))
 
     items: list[BulkSchemaItem] = []
-    for code, fields, _source, error in results:
+    for code, name, fields, _source, error in results:
         payload_error: ToolErrorPayload | None = None
         if error is not None:
             payload_error = ToolErrorPayload(
@@ -541,6 +541,7 @@ def csmar_bulk_schema(table_codes: list[str]) -> CallToolResult:
         items.append(
             BulkSchemaItem(
                 table_code=code,
+                table_name=name,
                 fields=fields,
                 error=payload_error,
             )

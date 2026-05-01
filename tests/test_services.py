@@ -147,13 +147,20 @@ class MetadataServiceTests(unittest.TestCase):
         # Prime cache for FS_Income only.
         self.service.read_table_schema("FS_Income")
 
-        results = self.service.bulk_read_schema(["FS_Income", "FS_Combas"])
-        by_code = {code: (fields, source, error) for code, fields, source, error in results}
+        # Prime tables cache so bulk_read_schema can resolve table_name.
+        self.service.list_tables("财务报表")
 
-        self.assertEqual(by_code["FS_Income"][1], "cache")
-        self.assertIsNone(by_code["FS_Income"][2])
-        self.assertEqual(by_code["FS_Combas"][1], "live")
-        self.assertIsNone(by_code["FS_Combas"][2])
+        results = self.service.bulk_read_schema(["FS_Income", "FS_Combas"])
+        by_code = {
+            code: (name, fields, source, error) for code, name, fields, source, error in results
+        }
+
+        self.assertEqual(by_code["FS_Income"][0], "利润表")
+        self.assertEqual(by_code["FS_Income"][2], "cache")
+        self.assertIsNone(by_code["FS_Income"][3])
+        self.assertEqual(by_code["FS_Combas"][0], "资产负债表")
+        self.assertEqual(by_code["FS_Combas"][2], "live")
+        self.assertIsNone(by_code["FS_Combas"][3])
 
 
 class MetadataSelfHealingTests(unittest.TestCase):

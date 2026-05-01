@@ -134,6 +134,9 @@ class BulkSchemaInput(StrictModel):
 
 class BulkSchemaItem(StrictModel):
     table_code: str = Field(..., description="Table code.")
+    table_name: str | None = Field(
+        default=None, description="Human-readable table name; null if catalog not cached."
+    )
     fields: list[FieldSchemaItem] | None = Field(
         default=None, description="Schema fields when available."
     )

@@ -138,15 +138,18 @@ class CsmarClient:
 
     def bulk_read_schema(
         self, table_codes: list[str]
-    ) -> list[tuple[str, list[FieldSchemaItem] | None, str, CsmarError | None]]:
-        outputs: list[tuple[str, list[FieldSchemaItem] | None, str, CsmarError | None]] = []
-        for code, fields, source, error in self._metadata.bulk_read_schema(table_codes):
+    ) -> list[tuple[str, str | None, list[FieldSchemaItem] | None, str, CsmarError | None]]:
+        outputs: list[
+            tuple[str, str | None, list[FieldSchemaItem] | None, str, CsmarError | None]
+        ] = []
+        for code, name, fields, source, error in self._metadata.bulk_read_schema(table_codes):
             if fields is None:
-                outputs.append((code, None, source, error))
+                outputs.append((code, name, None, source, error))
             else:
                 outputs.append(
                     (
                         code,
+                        name,
                         [self._to_field_schema_item(field) for field in fields],
                         source,
                         error,
