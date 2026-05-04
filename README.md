@@ -144,10 +144,19 @@ CSMAR 后端每日 API 配额非常严苛，MCP 的核心策略是**把绝大多
 
 ```bash
 uv sync
-uv run csmar-mcp --account YOUR_ACCOUNT --password YOUR_PASSWORD
+cp .env.example .env
+# fill in CSMAR_MCP_ACCOUNT / CSMAR_MCP_PASSWORD
+uv run csmar-mcp
 ```
 
 ## MCP 配置
+
+先在项目目录创建 `.env`：
+
+```dotenv
+CSMAR_MCP_ACCOUNT=YOUR_ACCOUNT
+CSMAR_MCP_PASSWORD=YOUR_PASSWORD
+```
 
 ```json
 {
@@ -158,16 +167,18 @@ uv run csmar-mcp --account YOUR_ACCOUNT --password YOUR_PASSWORD
         "--directory",
         "D:\\Developments\\PythonProject\\CSMAR-Data-MCP",
         "run",
-        "csmar-mcp",
-        "--account",
-        "YOUR_ACCOUNT",
-        "--password",
-        "YOUR_PASSWORD"
+        "csmar-mcp"
       ]
     }
   }
 }
 ```
+
+说明：
+
+- `csmar-mcp` 会优先读取 `CSMAR_MCP_ACCOUNT` / `CSMAR_MCP_PASSWORD`；若当前工作目录存在 `.env`，也会自动加载。
+- 仍兼容 `--account` / `--password`，但不建议继续使用，因为命令行参数更容易暴露在进程列表、启动配置和日志中。
+- `.env` 只是比命令行参数更稳妥，不是密文存储；请保持本地文件不入库。生产环境更适合用系统级环境变量或密钥管理服务。
 
 ## 开发：lint 与钩子
 
