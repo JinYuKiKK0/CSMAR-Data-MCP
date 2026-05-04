@@ -3,7 +3,11 @@
 mirrors the MCP tools one-to-one.
 
 Run:
-    python -m csmar_mcp.test_api --account ... --password ... [--host 0.0.0.0] [--port 8000]
+    python -m csmar_mcp.test_api [--host 0.0.0.0] [--port 8000]
+
+Credentials:
+    Set CSMAR_MCP_ACCOUNT / CSMAR_MCP_PASSWORD in the environment or a local .env file.
+    --account / --password remain supported as a compatibility fallback.
 """
 
 from __future__ import annotations
@@ -29,6 +33,7 @@ from .models import (
     ProbeQueryInput,
 )
 from .runtime import (
+    ACCOUNT_ENV_VAR,
     DEFAULT_BELONG,
     DEFAULT_CACHE_TTL_MINUTES,
     DEFAULT_LANG,
@@ -36,6 +41,9 @@ from .runtime import (
     DEFAULT_POLL_INTERVAL_SECONDS,
     DEFAULT_POLL_TIMEOUT_SECONDS,
     DEFAULT_RATE_LIMIT_COOLDOWN_MINUTES,
+    MISSING_CREDENTIALS_MESSAGE,
+    PASSWORD_ENV_VAR,
+    resolve_credentials,
 )
 
 _client: CsmarClient | None = None
@@ -192,13 +200,21 @@ app = Starlette(routes=routes)
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="csmar-test-api",
-        description="HTTP test API for CSMAR. Returns CSMAR's native upstream code/msg on error.",
+        description=(
+            "HTTP test API for CSMAR. Returns CSMAR's native upstream code/msg on error. "
+            f"Credentials can be passed via CLI args or the "
+            f"{ACCOUNT_ENV_VAR}/{PASSWORD_ENV_VAR} environment variables."
+        ),
     )
-    parser.add_argument("--account", required=True, help="CSMAR account")
-    parser.add_argument("--password", required=True, help="CSMAR password")
+    parser.add_argument("--account", default=None, help="CSMAR account")
+    parser.add_argument("--password", default=None, help="CSMAR password")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    args.account, args.password = resolve_credentials(args.account, args.password)
+    if not args.account or not args.password:
+        parser.error(MISSING_CREDENTIALS_MESSAGE)
+    return args
 
 
 def main(argv: Sequence[str] | None = None) -> None:
