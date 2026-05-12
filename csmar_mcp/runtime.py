@@ -25,6 +25,13 @@ DEFAULT_POLL_TIMEOUT_SECONDS = 900
 DEFAULT_CACHE_TTL_MINUTES = 3 * 24 * 60  # 3 days — applies to probes/validations/downloads
 DEFAULT_METADATA_TTL_DAYS = 30
 DEFAULT_RATE_LIMIT_COOLDOWN_MINUTES = 30
+ACCOUNT_ENV_VAR = "CSMAR_MCP_ACCOUNT"
+PASSWORD_ENV_VAR = "CSMAR_MCP_PASSWORD"
+DOTENV_FILENAME = ".env"
+MISSING_CREDENTIALS_MESSAGE = (
+    "Missing CSMAR credentials. Provide --account/--password or set "
+    f"{ACCOUNT_ENV_VAR}/{PASSWORD_ENV_VAR} in the environment or .env."
+)
 
 
 _runtime_settings: RuntimeSettings | None = None
@@ -33,20 +40,81 @@ _runtime_settings: RuntimeSettings | None = None
 def build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="csmar-mcp",
-        description="Run the CSMAR MCP server. Credentials must be passed via --account and --password.",
+        description=(
+            "Run the CSMAR MCP server. Credentials can be passed via CLI args or the "
+            f"{ACCOUNT_ENV_VAR}/{PASSWORD_ENV_VAR} environment variables."
+        ),
     )
     parser.add_argument("--account", default=None, help="CSMAR account")
     parser.add_argument("--password", default=None, help="CSMAR password")
     return parser
 
 
+def _strip_optional_quotes(value: str) -> str:
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+        return value[1:-1]
+    return value
+
+
+def _load_dotenv_values() -> dict[str, str]:
+    env_path = Path.cwd() / DOTENV_FILENAME
+    if not env_path.is_file():
+        return {}
+
+    values: dict[str, str] = {}
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.startswith("export "):
+            stripped = stripped[len("export ") :].strip()
+        key, separator, raw_value = stripped.partition("=")
+        if not separator:
+            continue
+        values[key.strip()] = _strip_optional_quotes(raw_value.strip())
+    return values
+
+
+def _resolve_secret_value(
+    cli_value: str | None,
+    *,
+    env_var_name: str,
+    dotenv_values: dict[str, str],
+) -> str | None:
+    if cli_value:
+        return cli_value
+
+    env_value = os.getenv(env_var_name, "").strip()
+    if env_value:
+        return env_value
+
+    dotenv_value = dotenv_values.get(env_var_name, "").strip()
+    if dotenv_value:
+        return dotenv_value
+    return None
+
+
+def resolve_credentials(account: str | None, password: str | None) -> tuple[str | None, str | None]:
+    dotenv_values = _load_dotenv_values()
+    resolved_account = _resolve_secret_value(
+        account,
+        env_var_name=ACCOUNT_ENV_VAR,
+        dotenv_values=dotenv_values,
+    )
+    resolved_password = _resolve_secret_value(
+        password,
+        env_var_name=PASSWORD_ENV_VAR,
+        dotenv_values=dotenv_values,
+    )
+    return resolved_account, resolved_password
+
+
 def parse_runtime_settings(argv: Sequence[str] | None = None) -> RuntimeSettings:
     parser = build_argument_parser()
     args = parser.parse_args(argv)
-    account = args.account
-    password = args.password
+    account, password = resolve_credentials(args.account, args.password)
     if not account or not password:
-        parser.error("Missing CSMAR credentials. Provide --account and --password.")
+        parser.error(MISSING_CREDENTIALS_MESSAGE)
     raw_state_dir = os.getenv("CSMAR_MCP_STATE_DIR", "").strip()
     state_dir = Path(raw_state_dir).expanduser().resolve() if raw_state_dir else None
 
@@ -82,8 +150,8 @@ def configure_runtime(settings: RuntimeSettings) -> None:
 def get_settings() -> RuntimeSettings:
     if _runtime_settings is None:
         raise RuntimeError(
-            "Runtime configuration is missing. Start the server with required CLI args, for example: "
-            "--account ... --password ..."
+            "Runtime configuration is missing. Start the server with CLI credentials or set "
+            f"{ACCOUNT_ENV_VAR}/{PASSWORD_ENV_VAR}."
         )
     return _runtime_settings
 

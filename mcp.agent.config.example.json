@@ -6,11 +6,7 @@
         "--directory",
         "D:\\Developments\\PythonProject\\Harness-Stata\\csmar-mcp",
         "run",
-        "csmar-mcp",
-        "--account",
-        "YOUR_ACCOUNT",
-        "--password",
-        "YOUR_PASSWORD"
+        "csmar-mcp"
       ]
     }
   }
