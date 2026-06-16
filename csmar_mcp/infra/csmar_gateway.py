@@ -9,6 +9,7 @@ import re
 import threading
 from collections.abc import Callable
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 from urllib import parse
 
@@ -29,6 +30,7 @@ class CsmarGateway:
         belong: str = "0",
         poll_interval_seconds: int = 3,
         poll_timeout_seconds: int = 900,
+        state_dir: str | Path | None = None,
     ) -> None:
         self._account = account
         self._password = password
@@ -37,10 +39,14 @@ class CsmarGateway:
         self._poll_interval_seconds = max(1, poll_interval_seconds)
         self._poll_timeout_seconds = max(30, poll_timeout_seconds)
 
-        self._service = CsmarService()
+        log_path = (
+            None if state_dir is None else Path(state_dir).expanduser().resolve() / "csmar-log.log"
+        )
+        self._service = CsmarService(log_path=log_path)
         self._http = urllib3.PoolManager()
         self._lock = threading.RLock()
         self._logged_in = False
+        self._token: str | None = None
 
     def list_databases(self) -> list[str]:
         response = self._get(self._service.urlUtil.getListDbsUrl(), include_belong=True)
@@ -240,7 +246,7 @@ class CsmarGateway:
 
     def _ensure_login(self) -> None:
         with self._lock:
-            if self._logged_in and self._get_token_lines() is not None:
+            if self._logged_in and self._token:
                 return
             self._login()
 
@@ -262,43 +268,27 @@ class CsmarGateway:
                 hint="Check account and password, then restart the MCP server.",
             )
 
-        self._service.writeToken(token, self._lang, self._belong)
+        self._token = token
         self._logged_in = True
 
-    def _get_token_lines(self) -> list[str] | None:
-        try:
-            token_lines = self._service.getTokenFromFile()
-        except Exception:
-            return None
-
-        if not token_lines or token_lines is False:
-            return None
-
-        if not isinstance(token_lines, list) or len(token_lines) < 2:
-            return None
-
-        return token_lines
-
     def _build_headers(self, include_belong: bool, include_json: bool) -> dict[str, str]:
-        token_lines = self._get_token_lines()
-        if token_lines is None:
+        if not self._token:
             self._login()
-            token_lines = self._get_token_lines()
 
-        if token_lines is None:
+        if not self._token:
             raise CsmarError(
                 "auth_failed",
-                "Authentication failed because the token file could not be read.",
+                "Authentication failed because the token could not be read.",
                 hint="Check account and password, then restart the MCP server.",
             )
 
         headers: dict[str, str] = {
-            "Lang": token_lines[1].strip(),
-            "Token": token_lines[0].strip(),
+            "Lang": self._lang,
+            "Token": self._token,
         }
 
         if include_belong:
-            headers["belong"] = token_lines[2].strip() if len(token_lines) >= 3 else self._belong
+            headers["belong"] = self._belong
 
         if include_json:
             headers["Content-Type"] = "application/json"
