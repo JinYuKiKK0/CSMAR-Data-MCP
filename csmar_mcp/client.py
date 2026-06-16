@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -66,12 +68,17 @@ class CsmarClient:
             belong=belong,
             poll_interval_seconds=poll_interval_seconds,
             poll_timeout_seconds=poll_timeout_seconds,
+            state_dir=resolved_state_dir,
         )
         self._metadata = MetadataService(self._gateway, self._state)
         self._query = QueryService(self._gateway, self._metadata, self._state)
 
     def _default_state_dir(self) -> Path:
-        return (Path(__file__).resolve().parent / "csmar_mcp_cache").resolve()
+        if sys.platform == "win32":
+            base_dir = os.getenv("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+        else:
+            base_dir = os.getenv("XDG_CACHE_HOME") or str(Path.home() / ".cache")
+        return (Path(base_dir).expanduser() / "csmar-mcp").resolve()
 
     def has_cached_entry(self, namespace: str, key: str) -> bool:
         return self._state.has_cached(namespace, key)

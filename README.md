@@ -34,7 +34,7 @@
 - 面向修复的错误：`code`、`message`、`hint`，以及可选的 `retry_after_seconds`、`suggested_args_patch`。
 - 日期区间只做格式与顺序校验，随后原样透传给 SDK。
 - 查询的预检与物化通过 `validation_id` 串联。
-- 运行时状态持久化在 SQLite 中，路径默认为 `<csmar_mcp 包目录>/csmar_mcp_cache/state.sqlite3`，跨工作目录的会话天然共享同一份缓存。
+- 运行时状态持久化在 SQLite 中，默认落在用户缓存目录，跨工作目录的会话天然共享同一份缓存。
 
 ## 工具示例
 
@@ -108,7 +108,7 @@
 - `cache_ttl_minutes = 4320`（即 **3 天**，对业务查询缓存 `probes / validations / downloads` 生效）
 - `metadata_ttl_days = 30`（元数据缓存 `databases / tables / schema` 的默认 TTL，可用 `CSMAR_MCP_METADATA_TTL_DAYS` 覆盖）
 - `rate_limit_cooldown_minutes = 30`（上游限流冷却窗口，与业务缓存 TTL 解耦）
-- `state_dir = <csmar_mcp 包目录>/csmar_mcp_cache/`（随包而非工作目录，天然跨会话共享；可用 `CSMAR_MCP_STATE_DIR` 环境变量显式覆盖）
+- `state_dir = 用户缓存目录/csmar-mcp/`（Windows 默认为 `%LOCALAPPDATA%\csmar-mcp`；Unix-like 默认为 `$XDG_CACHE_HOME/csmar-mcp` 或 `~/.cache/csmar-mcp`；可用 `CSMAR_MCP_STATE_DIR` 环境变量显式覆盖）
 
 ## 缓存与限流策略
 
@@ -124,7 +124,7 @@ CSMAR 后端每日 API 配额非常严苛，MCP 的核心策略是**把绝大多
 
 **跨目录共享**
 
-缓存 SQLite 文件固定在 `csmar_mcp` 包目录下的 `csmar_mcp_cache/state.sqlite3`，不跟随 `cwd`。在任何目录启动 MCP 会话都共享同一份缓存 —— 这是把限流风险降到最低的关键前提。
+缓存 SQLite 文件固定在用户缓存目录下的 `csmar-mcp/state.sqlite3`，不跟随 `cwd`。在任何目录启动 MCP 会话都共享同一份缓存 —— 这是把限流风险降到最低的关键前提。
 
 **持旧缓存自愈**
 
@@ -140,35 +140,28 @@ CSMAR 后端每日 API 配额非常严苛，MCP 的核心策略是**把绝大多
 - Python >= 3.12
 - [uv](https://docs.astral.sh/uv/)
 
-## 快速开始
+## 用户安装（推荐）
+
+发布到 PyPI 后，MCP 客户端应优先运行固定版本的包，而不是直接运行源码目录：
 
 ```bash
-uv sync
-cp .env.example .env
-# fill in CSMAR_MCP_ACCOUNT / CSMAR_MCP_PASSWORD
-uv run csmar-mcp
+uvx csmar-mcp==0.1.0
 ```
+
+推荐通过系统环境变量或 MCP 客户端配置传入 CSMAR 凭据。
 
 ## MCP 配置
-
-先在项目目录创建 `.env`：
-
-```dotenv
-CSMAR_MCP_ACCOUNT=YOUR_ACCOUNT
-CSMAR_MCP_PASSWORD=YOUR_PASSWORD
-```
 
 ```json
 {
   "mcpServers": {
     "csmar": {
-      "command": "uv",
-      "args": [
-        "--directory",
-        "D:\\Developments\\PythonProject\\CSMAR-Data-MCP",
-        "run",
-        "csmar-mcp"
-      ]
+      "command": "uvx",
+      "args": ["csmar-mcp==0.1.0"],
+      "env": {
+        "CSMAR_MCP_ACCOUNT": "YOUR_ACCOUNT",
+        "CSMAR_MCP_PASSWORD": "YOUR_PASSWORD"
+      }
     }
   }
 }
@@ -179,6 +172,17 @@ CSMAR_MCP_PASSWORD=YOUR_PASSWORD
 - `csmar-mcp` 会优先读取 `CSMAR_MCP_ACCOUNT` / `CSMAR_MCP_PASSWORD`；若当前工作目录存在 `.env`，也会自动加载。
 - 仍兼容 `--account` / `--password`，但不建议继续使用，因为命令行参数更容易暴露在进程列表、启动配置和日志中。
 - `.env` 只是比命令行参数更稳妥，不是密文存储；请保持本地文件不入库。生产环境更适合用系统级环境变量或密钥管理服务。
+
+## 开发模式（源码）
+
+源码模式会运行工作区里的当前代码，适合本地开发和调试；它会跟随未发布改动变化，不适合作为稳定的用户安装方式。
+
+```bash
+uv sync
+cp .env.example .env
+# fill in CSMAR_MCP_ACCOUNT / CSMAR_MCP_PASSWORD
+uv run csmar-mcp
+```
 
 ## 开发：lint 与钩子
 
@@ -192,6 +196,14 @@ CSMAR_MCP_PASSWORD=YOUR_PASSWORD
   配置见仓内 `.pre-commit-config.yaml`。pre-commit framework 原生做 stash-and-restore，partial stage 安全。
 - CI：`.github/workflows/lint.yml` 在 push 与 pull_request 上跑同一套 `scripts/check.py`
 - 扫描范围：`csmar_mcp` 与 `tests`，遗留 SDK `csmarapi/` 排除在外
+
+## 发布流程
+
+- 在 `pyproject.toml` 更新 `version`。
+- 本地确认 `uv run python scripts/check.py` 与 `uv run python -m unittest discover -s tests -p "test_*.py" -v` 通过。
+- 在 PyPI 配置 Trusted Publisher：project `csmar-mcp`，workflow `publish.yml`，environment `pypi`。
+- 在 GitHub 创建 `pypi` environment，然后发布 GitHub Release。
+- 发布后检查 `https://pypi.org/p/csmar-mcp`，并用 `uvx csmar-mcp==<version> --help` 做安装级冒烟验证。
 
 ## 说明
 
