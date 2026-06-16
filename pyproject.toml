@@ -2,7 +2,21 @@
 name = "csmar-mcp"
 version = "0.1.0"
 description = "MCP server for querying CSMAR metadata and materializing downloads"
+readme = "README.md"
 requires-python = ">=3.12"
+license = { text = "License not declared" }
+authors = [
+    { name = "CSMAR MCP maintainers" },
+]
+keywords = ["csmar", "mcp", "model-context-protocol"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Database",
+]
 dependencies = [
     "mcp[cli]>=1.26.0",
     "pandas>=2.2.0,<3",
@@ -13,6 +27,11 @@ dependencies = [
 
 [project.scripts]
 csmar-mcp = "csmar_mcp.server:main"
+
+[project.urls]
+Homepage = "https://github.com/JinYuKiKK0/CSMAR-Data-MCP"
+Source = "https://github.com/JinYuKiKK0/CSMAR-Data-MCP"
+Issues = "https://github.com/JinYuKiKK0/CSMAR-Data-MCP/issues"
 
 [dependency-groups]
 dev = [
@@ -27,6 +46,33 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["csmar_mcp", "csmarapi"]
+exclude = [
+    "/csmar_mcp/csmar_mcp_cache",
+    "/csmar_mcp/test_api.py",
+]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/.env.example",
+    "/README.md",
+    "/csmar_mcp",
+    "/csmarapi",
+    "/mcp.agent.config.example.json",
+    "/pyproject.toml",
+    "/scripts",
+    "/tests",
+]
+exclude = [
+    "/.codex",
+    "/.idea",
+    "/.ruff_cache",
+    "/.stata_agent",
+    "/.venv",
+    "/csmar-log.log",
+    "/csmar_mcp/csmar_mcp_cache",
+    "/downloads",
+    "/token.txt",
+]
 
 [tool.ruff]
 target-version = "py312"

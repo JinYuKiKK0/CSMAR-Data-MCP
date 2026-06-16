@@ -28,7 +28,7 @@ class CsmarService(object):
     '''
     dataList=[]
     
-    def __init__(self):
+    def __init__(self, log_path: str | os.PathLike[str] | None = None):
         '''
         Constructor
         '''
@@ -37,7 +37,11 @@ class CsmarService(object):
                     format='%(asctime)s %(filename)s %(levelname)s %(message)s',
                     datefmt='%a %d %b %Y %H:%M:%S')
         self.logger = logging.getLogger('CsmarService')
-        fh = logging.FileHandler('csmar-log.log', mode='a', encoding='utf-8', delay=False)
+        if log_path is None:
+            log_path = 'csmar-log.log'
+        else:
+            os.makedirs(os.path.dirname(os.path.abspath(os.fspath(log_path))), exist_ok=True)
+        fh = logging.FileHandler(log_path, mode='a', encoding='utf-8', delay=False)
         fh.setLevel(logging.INFO)
         fmt = logging.Formatter('%(asctime)s %(filename)s %(levelname)s %(message)s')
         fh.setFormatter(fmt)

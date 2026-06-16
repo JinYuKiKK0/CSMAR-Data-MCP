@@ -41,7 +41,11 @@ def load_test_api_module(runtime_module: types.ModuleType) -> types.ModuleType:
     client_module.CsmarClient = object
 
     uvicorn_module = types.ModuleType("uvicorn")
-    uvicorn_module.run = lambda *args, **kwargs: None
+
+    def run_uvicorn(*args: object, **kwargs: object) -> None:
+        return None
+
+    uvicorn_module.run = run_uvicorn
 
     pydantic_module = types.ModuleType("pydantic")
 
@@ -300,9 +304,7 @@ class TestApiParseArgsTests(unittest.TestCase):
             {"CSMAR_MCP_ACCOUNT": "env-user", "CSMAR_MCP_PASSWORD": "env-pass"},
             clear=True,
         ):
-            args = TEST_API_MODULE._parse_args(
-                ["--account", "cli-user", "--password", "cli-pass"]
-            )
+            args = TEST_API_MODULE._parse_args(["--account", "cli-user", "--password", "cli-pass"])
 
         self.assertEqual(args.account, "cli-user")
         self.assertEqual(args.password, "cli-pass")

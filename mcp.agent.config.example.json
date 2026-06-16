@@ -1,13 +1,12 @@
 {
   "mcpServers": {
     "csmar": {
-      "command": "uv",
-      "args": [
-        "--directory",
-        "D:\\Developments\\PythonProject\\Harness-Stata\\csmar-mcp",
-        "run",
-        "csmar-mcp"
-      ]
+      "command": "uvx",
+      "args": ["csmar-mcp==0.1.0"],
+      "env": {
+        "CSMAR_MCP_ACCOUNT": "YOUR_ACCOUNT",
+        "CSMAR_MCP_PASSWORD": "YOUR_PASSWORD"
+      }
     }
   }
 }
