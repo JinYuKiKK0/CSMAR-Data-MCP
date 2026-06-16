@@ -6,7 +6,7 @@ import sys
 import tempfile
 import types
 import unittest
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -153,7 +153,7 @@ parse_runtime_settings = RUNTIME_MODULE.parse_runtime_settings
 
 
 @contextmanager
-def working_directory(path: str) -> Iterator[None]:
+def working_directory(path: str) -> Generator[None, None, None]:
     previous = Path.cwd()
     os.chdir(path)
     try:
